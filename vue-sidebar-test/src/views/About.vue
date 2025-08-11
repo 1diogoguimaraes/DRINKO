@@ -1,6 +1,6 @@
 <template>
 	<main id="about-page">
-		<h1>About</h1>
-		<p>This is the about page</p>
+		<h1>Control Center</h1>
+		<p>This is the control center page</p>
 	</main>
 </template>

@@ -4,17 +4,17 @@
             <table id="customers">
                 <thead>
                 <tr>
-                    <th>ID</th>
-                    <th>State</th>
-                    <th>Mode</th>
+                <th v-for="head in headers" :key="head">
+                  {{ head }}
+                </th>
                 </tr>
                 </thead>
                 <tbody>
-                <tr v-for="status in statusData" :key="status.id">
-                    <td>{{ status.id }}</td>
-                <td>{{ status.state }}</td>
-                <td>{{ status.mode }}</td>
-                </tr>
+                  <tr v-for="(row,rowIndex) in data" :key="rowIndex">
+                    <td v-for="key in headers" :key="key">
+                      {{ row[key] }}
+                    </td>                 
+                  </tr>
                 </tbody>
             </table>
         </div>
@@ -23,8 +23,19 @@
 </template>
 
 <script setup>
+import { computed } from 'vue';
 
-const props = defineProps(['statusData'])
+
+const props = defineProps({data:{
+  type:Array,
+  required:true
+}})
+
+const headers= computed(()=> 
+  props.data.length > 0 ? Object.keys(props.data[0]):[]
+)
+
+
 
 
 </script>

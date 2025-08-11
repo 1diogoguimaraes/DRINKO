@@ -17,8 +17,8 @@
 				<span class="text">Home</span>
 			</router-link>
 			<router-link to="/about" class="button">
-				<span class="material-icons">construction</span>
-				<span class="text">About</span>
+				<span class="material-icons">gamepad</span>
+				<span class="text">Contol</span>
 			</router-link>
 			<router-link to="/table" class="button">
 				<span class="material-icons">table_view</span>
