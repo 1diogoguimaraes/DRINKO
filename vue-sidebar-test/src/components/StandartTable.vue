@@ -1,5 +1,5 @@
 <template>
-    <div class="status-table">
+    <div class="standart-table">
         <div>
             <table id="customers">
                 <thead>

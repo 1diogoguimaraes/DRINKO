@@ -2,12 +2,12 @@
 	<main id="Home-page">
 		<h1>Home</h1>
 		<p>This is the home page</p>
-		<StatusTable :data="statusData"/>
+		<StandartTable :data="statusData"/>
 	</main>
 </template>
 
 <script setup>
-import StatusTable from '../components/StatusTable.vue';
+import StandartTable from '../components/StandartTable.vue';
 import { reactive, onMounted, onBeforeUnmount } from 'vue'
 
 

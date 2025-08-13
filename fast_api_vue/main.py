@@ -4,17 +4,7 @@ import asyncio
 from typing import Any
 import json
 
-
-# Configure MQTT settings
-mqtt_config = MQTTConfig(
-    host="192.168.0.100",  # Replace with your broker address
-    port=1883,                       # Default MQTT port
-    keepalive=60,                    # Keep alive time in seconds
-    username="userdio",        # Optional username
-    password="legomosquitto8109",        # Optional password
-    client_id="fastapi_client",      # Unique client ID
-    # Add other configurations like ssl, will, etc. as needed
-)
+from config import mqtt_config
 
 # Initialize FastAPI app
 app = FastAPI()
@@ -73,7 +63,9 @@ async def message(client, topic, payload, qos, properties: Any):
 
     # Split topic to extract device ID
     parts = topic.split("/")
-    if len(parts) == 3 and parts[2] == "status":
+    if len(parts) == 3 and parts[2] == "relay":
+        print("Relay handle function")
+    elif len(parts) == 3 and parts[2] == "status":
         device_id = parts[1]  # Get the device ID (e.g., 'device1')
         state = data.get("state")        # Get the "state" field
         mode=data.get("mode")

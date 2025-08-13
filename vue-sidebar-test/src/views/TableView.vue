@@ -2,83 +2,30 @@
 	<main id="Table-page">
 		<h1>Table</h1>
 		<p>This is the table page</p>
-
-		<table id="customers">
-			<thead>
-				<tr>
-					<th>Company</th>
-					<th>Contact</th>
-					<th>Country</th>
-				</tr>
-			</thead>
-			<tbody>
-				<tr>
-					<td>Alfreds Futterkiste</td>
-					<td>Maria Anders</td>
-					<td>Germany</td>
-				</tr>
-				<tr>
-					<td>Berglunds snabbköp</td>
-					<td>Christina Berglund</td>
-					<td>Sweden</td>
-				</tr>
-				<tr>
-					<td>Centro comercial Moctezuma</td>
-					<td>Francisco Chang</td>
-					<td>Mexico</td>
-				</tr>
-				<tr>
-					<td>Ernst Handel</td>
-					<td>Roland Mendel</td>
-					<td>Austria</td>
-				</tr>
-				<tr>
-					<td>Island Trading</td>
-					<td>Helen Bennett</td>
-					<td>UK</td>
-				</tr>
-				<tr>
-					<td>Königlich Essen</td>
-					<td>Philip Cramer</td>
-					<td>Germany</td>
-				</tr>
-				<tr>
-					<td>Laughing Bacchus Winecellars</td>
-					<td>Yoshi Tannamuri</td>
-					<td>Canada</td>
-				</tr>
-				<tr>
-					<td>Magazzini Alimentari Riuniti</td>
-					<td>Giovanni Rovelli</td>
-					<td>Italy</td>
-				</tr>
-			</tbody>
-		</table>
+		<StandartTable :data="customersData"/>
 	</main>
 </template>
 
+<script setup>
+
+import StandartTable from '../components/StandartTable.vue';
+import { reactive } from 'vue'
+
+const customersData = reactive([
+  { id: 1, company: 'Alfreds Futterkiste', contact: 'Maria Anders', country: 'Germany' },
+  { id: 2, company: 'Berglunds snabbköp', contact: 'Christina Berglund', country: 'Sweden' },
+  { id: 3, company: 'Centro comercial Moctezuma', contact: 'Francisco Chang', country: 'Mexico' },
+  { id: 4, company: 'Ernst Handel', contact: 'Roland Mendel', country: 'Austria' },
+  { id: 5, company: 'Island Trading', contact: 'Helen Bennett', country: 'UK' },
+  { id: 6, company: 'Königlich Essen', contact: 'Philip Cramer', country: 'Germany' },
+  { id: 7, company: 'Laughing Bacchus Winecellars', contact: 'Yoshi Tannamuri', country: 'Canada' },
+  { id: 8, company: 'Magazzini Alimentari Riuniti', contact: 'Giovanni Rovelli', country: 'Italy' }
+]);
+
+
+
+</script>
+
 <style lang="scss" scoped>
-#customers {
-  font-family: Arial, Helvetica, sans-serif;
-  border-collapse: collapse;
-  width: 100%;
-}
-
-#customers td, #customers th {
-  border: 1px solid #ddd;
-  padding: 8px;
-}
-
-#customers tr:nth-child(even){background-color: #f2f2f2;}
-
-#customers tr:hover {background-color: #ddd;}
-
-#customers th {
-  padding-top: 12px;
-  padding-bottom: 12px;
-  text-align: left;
-  background-color: #04AA6D;
-  color: white;
-}
 
 </style>
