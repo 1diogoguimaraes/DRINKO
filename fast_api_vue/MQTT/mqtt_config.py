@@ -1,5 +1,5 @@
 # config.py
-from fastapi_mqtt import MQTTConfig
+from fastapi_mqtt import MQTTConfig # type: ignore
 
 mqtt_config = MQTTConfig(
     host="192.168.0.100",

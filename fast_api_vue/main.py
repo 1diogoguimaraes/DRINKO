@@ -1,100 +1,186 @@
-from fastapi import FastAPI, Depends,WebSocket,WebSocketDisconnect
-from fastapi_mqtt import FastMQTT, MQTTConfig
-import asyncio
-from typing import Any
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException
+from sqlalchemy.orm import Session
 import json
+from typing import Dict, Any
 
-from config import mqtt_config
+from DB import crud, models, schemas
+from DB.database import engine, Base, SessionLocal
 
-# Initialize FastAPI app
+Base.metadata.create_all(bind=engine)
+
 app = FastAPI()
-fast_mqtt = FastMQTT(config=mqtt_config)
-fast_mqtt.init_app(app)
 
-# WebSocket Client
-clients = []
+# Memory Stores
+matches_memory: Dict[int, dict] = {}
+clients = []  # frontend live viewers
+device_connections: Dict[str, WebSocket] = {}  # ESP32 connections
+
+# Dependency
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+@app.get("/")
+async def root():
+    return {"message": "Hello World"}
+
+
+# ------------------------
+# WebSocket endpoints
+# ------------------------
 
 @app.websocket("/ws/live")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_live(websocket: WebSocket):
+    """Frontend clients subscribe here to receive live updates."""
     await websocket.accept()
     clients.append(websocket)
     try:
         while True:
-            await websocket.receive_text()  # Optional: Keep connection alive
+            await websocket.receive_text()  # keep alive
     except WebSocketDisconnect:
         clients.remove(websocket)
 
 
-# Define MQTT topics and corresponding handler functions
-@fast_mqtt.on_connect()
-def connect(client, flags, rc, properties: Any):
-    """
-    Callback function for when the client connects to the MQTT broker.
-    """
-    print("Connected: ", client, flags, rc, properties)
-    # Subscribe to topics here if needed
-    fast_mqtt.client.subscribe("esp32/test") # Replace with your topic
-    fast_mqtt.client.subscribe("esp32/+/status"); 
-
-@fast_mqtt.on_disconnect()
-def disconnect(client, packet, exc=None):
-    """
-    Callback function for when the client disconnects from the MQTT broker.
-    """
-    print("Disconnected")
-
-@fast_mqtt.on_subscribe()
-def subscribe(client, mid, qos, properties: Any):
-    """
-    Callback function for when the client subscribes to a topic.
-    """
-    print("Subscribed", client, mid, qos, properties)
-
-@fast_mqtt.on_message()
-async def message(client, topic, payload, qos, properties: Any):
-    message_text = payload.decode()
-    print(f"Topic: {topic} | Payload: {message_text}")
+@app.websocket("/ws/device/{device_id}")
+async def websocket_device(websocket: WebSocket, device_id: str):
+    """ESP32 connects here with its device_id."""
+    await websocket.accept()
+    device_connections[device_id] = websocket
+    print(f"Device {device_id} connected via WS")
 
     try:
-        data = json.loads(message_text)  # Parse JSON
+        while True:
+            message = await websocket.receive_text()
+            await handle_device_message(device_id, message)
+    except WebSocketDisconnect:
+        print(f"Device {device_id} disconnected")
+        device_connections.pop(device_id, None)
 
-    except json.JSONDecodeError:
-        print("Failed to decode JSON payload.")
 
-    # Split topic to extract device ID
-    parts = topic.split("/")
-    if len(parts) == 3 and parts[2] == "relay":
-        print("Relay handle function")
-    elif len(parts) == 3 and parts[2] == "status":
-        device_id = parts[1]  # Get the device ID (e.g., 'device1')
-        state = data.get("state")        # Get the "state" field
-        mode=data.get("mode")
-        team=data.get("team")
-        relay_pos=data.get("relay_pos")
-        print(f"State: {state}")
-        print(device_id)
-        print(state)
-        await handle_device_status(device_id, state,mode,team,relay_pos)
-    elif len(parts) == 3 and parts[2] == "results":
-        device_id = parts[1]
-        start_weight = data.get("start_weight")        # Get the "state" field
-        drink_time=data.get("drink_time")
-        end_weight=data.get("end_weight")
-        handle_device_results(device_id,start_weight,drink_time,end_weight)
+# -----------------
+# API DB Endpoints
+# -----------------
+
+@app.post("/matches/", response_model=schemas.MatchInResponse)
+def create_match(match: schemas.MatchInMemory, db: Session = Depends(get_db)):
+    db_match = crud.create_match(db, match.match_type)
+
+    matches_memory[db_match.id] = match.dict(by_alias=True, exclude_unset=False)
+    matches_memory[db_match.id]["id"] = db_match.id
+    matches_memory[db_match.id]["status"] = "waiting"
+
+    # Send config to ESPs (via WS)
+    for team_index, team in enumerate(match.teams):
+        for player_index, player in enumerate(team.players):
+            device_id = player.device_id
+            payload = json.dumps({
+                "type": "config",
+                "match_id": db_match.id,
+                "match_type": db_match.match_type,
+                "team": team_index,
+                "position": player_index
+            })
+            if device_id in device_connections:
+                asyncio.create_task(device_connections[device_id].send_text(payload))
+                print(f"Sent config to {device_id}: {payload}")
+
+    return matches_memory[db_match.id]
+
+
+@app.post("/matches/{match_id}/start")
+async def start_match(match_id: int):
+    if match_id not in matches_memory:
+        raise HTTPException(status_code=404, detail="Match not found in memory")
+
+    match = matches_memory[match_id]
+    if match["status"] != "waiting":
+        raise HTTPException(status_code=400, detail="Match already started or finished")
+
+    match_type = match["match_type"]
+
+    if match_type == "solo":
+        await _start_solo(match_id)
+    elif match_type == "1v1":
+        await _start_1v1(match_id)
+    elif match_type == "relay":
+        await _start_relay(match_id)
     else:
-        print("Unrecognized topic structure.")
+        raise HTTPException(status_code=400, detail="Unknown match type")
 
-    """
-    Callback function for when a message is received on a subscribed topic.
-    """
-    print("Received message:", topic, payload.decode(), qos, properties)
-    # Process the received message here
-    # Example: Save to database, trigger an event, etc.
+    match["status"] = "running"
+    return {"status": "started", "match_id": match_id, "match_type": match_type}
 
-async def handle_device_status(device_id: str, status: str,mode:str,team:str,relay_pos:int):
-    print(f"Received status from {device_id}: {status},{mode},{team},{relay_pos}")
-    
-    # Example: Forward to frontend if live
+
+# -----------------
+# Start helpers
+# -----------------
+
+async def _start_solo(match_id: int):
+    player = matches_memory[match_id]["teams"][0]["players"][0]
+    device_id = player["device_id"]
+    if device_id in device_connections:
+        await device_connections[device_id].send_text(json.dumps({"type": "start"}))
+
+
+async def _start_1v1(match_id: int):
+    for team in matches_memory[match_id]["teams"]:
+        for player in team["players"]:
+            device_id = player["device_id"]
+            if device_id in device_connections:
+                await device_connections[device_id].send_text(json.dumps({"type": "start"}))
+
+
+async def _start_relay(match_id: int):
+    for team in matches_memory[match_id]["teams"]:
+        if len(team["players"]) > 0:
+            first_player = team["players"][0]
+            device_id = first_player["device_id"]
+            if device_id in device_connections:
+                await device_connections[device_id].send_text(json.dumps({
+                    "type": "start",
+                    "relay_pos": 0
+                }))
+
+
+# -----------------
+# Handlers
+# -----------------
+
+async def handle_device_message(device_id: str, message: str):
+    try:
+        data = json.loads(message)
+    except Exception:
+        print(f"Invalid JSON from {device_id}: {message}")
+        return
+
+    msg_type = data.get("type")
+
+    if msg_type == "status":
+        await handle_device_status(device_id, data)
+    elif msg_type == "results":
+        handle_device_results(device_id, data)
+    elif msg_type == "relay":
+        handle_match_relay(
+            match_id=data.get("match"),
+            team_index=data.get("team"),
+            device_id=device_id
+        )
+    else:
+        print(f"Unknown message type from {device_id}: {data}")
+
+
+async def handle_device_status(device_id: str, data: dict):
+    status = data.get("state")
+    mode = data.get("mode")
+    team = data.get("team")
+    relay_pos = data.get("relay_pos")
+
+    print(f"Status {status} from {device_id}")
+
     for ws in clients:
         await ws.send_text(json.dumps({
             "type": "status",
@@ -106,50 +192,54 @@ async def handle_device_status(device_id: str, status: str,mode:str,team:str,rel
         }))
 
 
-async def handle_device_results(device_id:str,start_weight:float,drink_time:float,end_weight:float):
-    print(f"Received results from {device_id}: {start_weight},{drink_time},{end_weight}")
-    for ws in clients:
-        await ws.send_text(json.dumps({
-            "type": "result",
-            "device_id": device_id,
-            "start_weight": start_weight,
-            "drink_time": drink_time,
-            "end_weight": end_weight
+def handle_device_results(device_id: str, data: dict):
+    start_weight = data.get("start_weight")
+    drink_time = data.get("drink_time")
+    end_weight = data.get("end_weight")
 
-        }))
+    for match_id, match_data in matches_memory.items():
+        for team in match_data["teams"]:
+            for player in team["players"]:
+                if player["device_id"] == device_id:
+                    player["time_seconds"] = drink_time
+                    player["start_weight"] = start_weight
+                    player["end_weight"] = end_weight
+                    print(f"Updated {device_id} in match {match_id}")
+                    return
+    print(f"Device {device_id} not found in any active match")
 
 
+def handle_match_relay(match_id: int, team_index: int, device_id: str):
+    match = matches_memory.get(match_id)
+    if not match:
+        print(f"Match {match_id} not found")
+        return
 
-# FastAPI endpoint for publishing messages
-@app.get("/publish/{message}")
-async def publish_message(message: str):
-    """
-    Endpoint to publish a message to a specified MQTT topic.
-    """
-    fast_mqtt.publish("esp32/3/status", message) # Replace with your topic
-    return {"result": True, "message": "Published"}
+    team = match["teams"][team_index]
+    players = team["players"]
 
-# FastAPI endpoint to subscribe to a topic
-@app.get("/subscribe/{topic}")
-async def subscribe_to_topic(topic: str):
-  """
-  Endpoint to subscribe to a topic dynamically.
-  """
-  fast_mqtt.subscribe(topic)
-  return {"result": True, "message": f"Subscribed to {topic}"}
+    current_pos = next((i for i, p in enumerate(players) if p["device_id"] == device_id), None)
+    if current_pos is None:
+        print(f"Device {device_id} not found in team {team_index}")
+        return
 
-# Example usage:  Starting the MQTT client in a background task
-async def run_mqtt():
-    await fast_mqtt.start()
+    if current_pos < len(players) - 1:
+        next_device_id = players[current_pos + 1]["device_id"]
+        if next_device_id in device_connections:
+            asyncio.create_task(device_connections[next_device_id].send_text(
+                json.dumps({"type": "start", "relay_pos": current_pos + 1})
+            ))
+        print(f"Relay: started next device {next_device_id}")
+    else:
+        team["finished"] = True
+        print(f"Team {team_index} finished relay in match {match_id}")
 
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(run_mqtt())
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    await fast_mqtt.stop()
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+        if all(t.get("finished") for t in match["teams"]):
+            match["status"] = "finished"
+            team_times = [
+                sum(p.get("time_seconds") or 0 for p in t["players"])
+                for t in match["teams"]
+            ]
+            winner_index = min(range(len(team_times)), key=lambda i: team_times[i])
+            match["winner_team"] = winner_index
+            print(f"Match {match_id} finished! Winner: Team {winner_index}")
