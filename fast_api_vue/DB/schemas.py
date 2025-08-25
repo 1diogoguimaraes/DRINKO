@@ -1,3 +1,4 @@
+#schemas.py
 from pydantic import BaseModel
 from typing import List, Optional
 
@@ -5,6 +6,7 @@ from typing import List, Optional
 
 class PlayerInMemory(BaseModel):
     device_id: str
+    status:str
     player_name: Optional[str] = None
     time_seconds: Optional[float] = None
     start_weight: Optional[float] = None
@@ -12,6 +14,7 @@ class PlayerInMemory(BaseModel):
 
 class TeamInMemory(BaseModel):
     team_name: Optional[str] = None
+    finished: bool
     players: List[PlayerInMemory]
 
 class MatchInMemory(BaseModel):
@@ -32,6 +35,7 @@ class MatchInResponse(MatchInMemory):
 
 class PlayerCreate(BaseModel):
     player_name: Optional[str] = None
+    reaction_time_seconds: Optional[float] = None
     time_seconds: Optional[float] = None
     start_weight: Optional[float] = None
     end_weight: Optional[float] = None

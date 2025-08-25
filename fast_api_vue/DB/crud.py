@@ -1,3 +1,4 @@
+#crud.py
 from sqlalchemy.orm import Session
 from . import models,schemas
 
@@ -59,6 +60,7 @@ def finalize_match(db: Session, match_data: dict, match_id: int):
                     match_id=match_id,
                     team_id=team.id if team.name else None,
                     player_id=player.id,
+                    reaction_time_seconds=player_info["reaction_time_seconds"],
                     time_seconds=player_info["time_seconds"],
                     start_weight=player_info.get("start_weight"),
                     end_weight=player_info.get("end_weight")
