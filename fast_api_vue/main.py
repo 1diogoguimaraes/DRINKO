@@ -1,4 +1,5 @@
 import asyncio
+import random
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException
 from sqlalchemy.orm import Session
 import json
@@ -12,13 +13,20 @@ Base.metadata.create_all(bind=engine)
 app = FastAPI()
 
 # Memory Stores
-matches_memory: Dict[int, dict] = {}
-clients_status = []  # frontend live viewers
-clients_matches= []
-clients_live= []
+matches_memory: Dict[int, dict] = {}            # whole match structures (control + public)
+device_connections: Dict[str, WebSocket] = {}   # ESP32 sockets (backend <-> device)
+devices_state: Dict[str, dict] = {}             # latest telemetry per device (for live UI)
 
-device_connections: Dict[str, WebSocket] = {}  # ESP32 connections
-devices_state: Dict[str, dict] = {}
+# WebSocket client registries (frontend)
+clients_matches = []  # control & public subscribers of matches
+clients_live = []     # control & public subscribers of live device data
+
+device_registry = {
+    "ESP-001": {"mac": "84:1F:E8:16:89:08"},
+    "ESP-002": {"mac": "84:1F:E8:17:2E:44"},
+    "ESP-003": {"mac": "84:1F:E8:1A:B2:F8"},
+    # ... all your 10 devices
+}
 
 
 # Dependency
@@ -36,109 +44,158 @@ async def root():
 
 @app.get("/matches/memory")
 def debug_matches_memory():
-    """
-    Debug endpoint: return raw in-memory matches dict.
-    """
     return matches_memory
 
-# ------------------------
-# WebSocket endpoints
-# ------------------------
+@app.get("/devices")
+def debug_devices_connections():
+    return device_connections
 
-@app.websocket("/ws/live")
-async def websocket_live(websocket: WebSocket):
-    """Frontend clients subscribe here to receive live updates."""
-    await websocket.accept()
-    clients_status.append(websocket)
-    try:
-        while True:
-            await websocket.receive_text()  # keep alive
-    except WebSocketDisconnect:
-        clients_status.remove(websocket)
-
+# ========================
+# WS: MATCHES (snapshots + updates)
+# ========================
 @app.websocket("/ws/matches")
 async def websocket_matches(websocket: WebSocket):
     await websocket.accept()
     clients_matches.append(websocket)
 
-    # send current state immediately
-    await websocket.send_text(json.dumps({
+    # Send current snapshot immediately
+    await _safe_send(websocket, {
         "type": "matches_snapshot",
         "data": matches_memory
-    }))
+    })
 
     try:
-        while True:
-            await websocket.receive_text()  # keep connection alive
-    except WebSocketDisconnect:
-        clients_matches.remove(websocket)
-
-async def broadcast_matches():
-    data = json.dumps({
-        "type": "matches_update",
-        "data": matches_memory
-    })
-    for ws in clients_matches:
-        await ws.send_text(data)
-
-async def broadcast_matches():
-    data = json.dumps({
-        "type": "matches_update",
-        "data": matches_memory
-    })
-    to_remove = []
-    for ws in clients_matches:
-        try:
-            await ws.send_text(data)
-        except:
-            to_remove.append(ws)
-    for ws in to_remove:
-        clients_matches.remove(ws)
-
-@app.websocket("/ws/live_results")
-async def websocket_live_results(websocket: WebSocket):
-    await websocket.accept()
-    clients_live.append(websocket)
-    try:
+        # keep-alive (ignore incoming)
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
-        clients_live.remove(websocket)
+        _safe_remove(clients_matches, websocket)
 
-async def broadcast_result_update():
-    data = json.dumps({
-        "type": "live_snapshot",
+
+async def broadcast_matches():
+    """Broadcast the whole matches_memory to all /ws/matches clients."""
+    await _broadcast(clients_matches, {
+        "type": "matches_update",
+        "data": matches_memory
+    })
+
+# ========================
+# WS: LIVE DEVICES (snapshots + updates)
+# ========================
+@app.websocket("/ws/live")
+async def websocket_live(websocket: WebSocket):
+    await websocket.accept()
+    clients_live.append(websocket)
+
+    # Send devices snapshot immediately
+    await _safe_send(websocket, {
+        "type": "devices_snapshot",
         "devices": devices_state
     })
-    to_remove=[]
-    for ws in clients_live:
+
+    try:
+        # keep-alive (ignore incoming)
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        _safe_remove(clients_live, websocket)
+
+
+async def broadcast_live_event(event: dict):
+    """Broadcast a single live event (status/result) to all /ws/live clients."""
+    await _broadcast(clients_live, event)    
+
+
+# ========================
+# Utility: safe broadcast helpers
+# ========================
+async def _broadcast(client_list, payload: dict):
+    """Send the same JSON to all sockets, removing any dead ones."""
+    data = json.dumps(payload)
+    to_remove = []
+    for ws in list(client_list):
         try:
             await ws.send_text(data)
-        except:
+        except Exception:
             to_remove.append(ws)
     for ws in to_remove:
-        clients_live.remove(ws)        
+        _safe_remove(client_list, ws)
 
 
+async def _safe_send(ws: WebSocket, payload: dict):
+    try:
+        await ws.send_text(json.dumps(payload))
+    except Exception:
+        pass  # caller handles removal if needed
+
+
+def _safe_remove(client_list, ws: WebSocket):
+    try:
+        client_list.remove(ws)
+    except ValueError:
+        pass
+
+
+# ========================
+# WS: DEVICE connections
+# ========================
+import traceback
 
 @app.websocket("/ws/device/{device_id}")
 async def websocket_device(websocket: WebSocket, device_id: str):
-    """ESP32 connects here with its device_id."""
     await websocket.accept()
     device_connections[device_id] = websocket
     print(f"Device {device_id} connected via WS")
 
+    # 🔹 Replay config if this device already belongs to a match
+    for match_id, match in matches_memory.items():
+        for team_index, team in enumerate(match["teams"]):
+            for relay_pos, player in enumerate(team["players"]):
+                if player["device_id"] == device_id:
+                    players = team["players"]
+                    next_device = None
+                    if relay_pos < len(players) - 1:
+                        next_device_id = players[relay_pos + 1]["device_id"]
+                        next_device = device_registry.get(next_device_id, {}).get("mac")
+
+
+                    await _safe_send(websocket, {
+                        "type": "config",
+                        "match_id": match_id,
+                        "match_type": match["match_type"],
+                        "team": team_index,
+                        "position": relay_pos,
+                        "next_device": next_device
+                    })
+                    break
+
     try:
         while True:
-            message = await websocket.receive_text()
-            await handle_device_message(device_id, message)
-    except WebSocketDisconnect:
-        print(f"Device {device_id} disconnected")
+            try:
+                text = await websocket.receive_text()
+                print(f"[FROM {device_id}] {text}")
+                await handle_device_message(device_id, text)
+            except WebSocketDisconnect:
+                print(f"Device {device_id} disconnected")
+                break
+            except Exception as e:
+                print(f"Error handling message from {device_id}: {e}")
+                import traceback
+                traceback.print_exc()
+    finally:
         device_connections.pop(device_id, None)
 
-# -----------------
-# API DB Endpoints
-# ---------------
+
+
+
+
+
+
+
+
+# ========================
+# REST: matches
+# ========================
 @app.post("/matches/", response_model=schemas.MatchInResponse)
 async def create_match(match: schemas.MatchInMemory, db: Session = Depends(get_db)):
     db_match = crud.create_match(db, match.match_type)
@@ -147,24 +204,35 @@ async def create_match(match: schemas.MatchInMemory, db: Session = Depends(get_d
     matches_memory[db_match.id]["id"] = db_match.id
     matches_memory[db_match.id]["status"] = "waiting"
 
-    # Send config to ESPs (via WS)
+    # Send config to connected devices
     for team_index, team in enumerate(match.teams):
         for player_index, player in enumerate(team.players):
-            device_id = player.device_id
-            payload = json.dumps({
+            dev_id = player.device_id
+
+            # 🔹 Get the next device MAC if relay and not last player
+            next_device_mac = None
+            if match.match_type == "relay" and player_index < len(team.players) - 1:
+                next_device_id = team.players[player_index + 1].device_id
+                # 🔹 Look up its MAC address
+                next_device_mac = device_registry.get(next_device_id, {}).get("mac")
+
+            payload = {
                 "type": "config",
                 "match_id": db_match.id,
                 "match_type": db_match.match_type,
                 "team": team_index,
-                "position": player_index
-            })
-            if device_id in device_connections:
-                await device_connections[device_id].send_text(payload)
-                print(f"Sent config to {device_id}: {payload}")
+                "position": player_index,
+                "next_device": next_device_mac  # <-- MAC instead of string ID
+            }
 
+            if dev_id in device_connections:
+                await _safe_send(device_connections[dev_id], payload)
+                print(f"Sent config to {dev_id}: {payload}")
+
+    # Notify UI
     asyncio.create_task(broadcast_matches())
-
     return matches_memory[db_match.id]
+
 
 
 
@@ -177,21 +245,17 @@ async def start_match(match_id: int):
     if match["status"] != "waiting":
         raise HTTPException(status_code=400, detail="Match already started or finished")
 
-    # ✅ Ensure all players are READY
+    # Ensure all players are READY
     not_ready = [
         p["device_id"]
         for team in match["teams"]
         for p in team["players"]
-        if p.get("status") != "ready"
+        if p.get("status") != "locked"
     ]
     if not_ready:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Not all devices are ready: {not_ready}"
-        )
+        raise HTTPException(status_code=400, detail=f"Not all devices are ready: {not_ready}")
 
     match_type = match["match_type"]
-
     if match_type == "solo":
         await _start_solo(match_id)
     elif match_type == "1v1":
@@ -202,6 +266,7 @@ async def start_match(match_id: int):
         raise HTTPException(status_code=400, detail="Unknown match type")
 
     match["status"] = "running"
+    asyncio.create_task(broadcast_matches())
     return {"status": "started", "match_id": match_id, "match_type": match_type}
 
 
@@ -211,29 +276,51 @@ async def start_match(match_id: int):
 
 async def _start_solo(match_id: int):
     player = matches_memory[match_id]["teams"][0]["players"][0]
-    device_id = player["device_id"]
-    if device_id in device_connections:
-        await device_connections[device_id].send_text(json.dumps({"type": "start"}))
+    dev_id = player["device_id"]
+    if dev_id in device_connections:
+        await _safe_send(device_connections[dev_id], {"type": "start"})
 
 
 async def _start_1v1(match_id: int):
     for team in matches_memory[match_id]["teams"]:
         for player in team["players"]:
-            device_id = player["device_id"]
-            if device_id in device_connections:
-                await device_connections[device_id].send_text(json.dumps({"type": "start"}))
+            dev_id = player["device_id"]
+            if dev_id in device_connections:
+                await _safe_send(device_connections[dev_id], {"type": "start"})
 
 
 async def _start_relay(match_id: int):
-    for team in matches_memory[match_id]["teams"]:
-        if len(team["players"]) > 0:
-            first_player = team["players"][0]
-            device_id = first_player["device_id"]
-            if device_id in device_connections:
-                await device_connections[device_id].send_text(json.dumps({
+    match = matches_memory[match_id]
+
+    for team_index, team in enumerate(match["teams"]):
+        players = team["players"]
+        if not players:
+            continue
+
+        for relay_pos, player in enumerate(players):
+            dev_id = player["device_id"]
+            if dev_id not in device_connections:
+                continue
+
+            if relay_pos == 0:
+                # 🔹 First player starts
+                await _safe_send(device_connections[dev_id], {
                     "type": "start",
-                    "relay_pos": 0
-                }))
+                    "relay_pos": relay_pos,
+                    "team": team_index,
+                    "match_id": match_id
+                })
+            else:
+                # 🔹 Other players know relay already running
+                await _safe_send(device_connections[dev_id], {
+                    "type": "in_relay",
+                    "relay_pos": relay_pos,
+                    "team": team_index,
+                    "match_id": match_id
+                })
+
+    print(f"[Relay] Match {match_id} started, all players notified")
+
 
 
 
@@ -244,7 +331,6 @@ async def update_match_memory(match_id: int, match: schemas.MatchInMemory):
     if match_id not in matches_memory:
         return {"error": "Match not found in memory"}
 
-    # Keep match_type and team/player structure updated
     matches_memory[match_id]["match_type"] = match.match_type
     matches_memory[match_id]["teams"] = [team.dict() for team in match.teams]
 
@@ -261,6 +347,7 @@ async def update_player_time(match_id: int, device_id: str, time_seconds: float)
         for player in team["players"]:
             if player["device_id"] == device_id:
                 player["time_seconds"] = time_seconds
+                asyncio.create_task(broadcast_matches())
                 return {"status": "updated", "match_id": match_id}
 
     return {"error": "Device not found in match"}
@@ -275,14 +362,29 @@ async def finalize_match(match_id: int, db: Session = Depends(get_db)):
     match_data = matches_memory[match_id]
     result = crud.finalize_match(db, match_data, match_id)
 
+    # 🔹 Broadcast reset to all devices in this match
+    for team in match_data["teams"]:
+        for player in team["players"]:
+            dev_id = player["device_id"]
+            if dev_id in device_connections:
+                asyncio.create_task(_safe_send(
+                    device_connections[dev_id],
+                    {"type": "reset"}
+                ))
+
     matches_memory.pop(match_id, None)
+    asyncio.create_task(broadcast_matches())
     return {"status": "finalized", "match_id": match_id, "saved": bool(result)}
+
 
 
 # -----------------
 # Handlers
 # -----------------
 
+# ========================
+# Device message handlers
+# ========================
 async def handle_device_message(device_id: str, message: str):
     try:
         data = json.loads(message)
@@ -291,104 +393,260 @@ async def handle_device_message(device_id: str, message: str):
         return
 
     msg_type = data.get("type")
-
     if msg_type == "status":
         await handle_device_status(device_id, data)
     elif msg_type == "results":
-        handle_device_results(device_id, data)
-    elif msg_type == "relay":
-        handle_match_relay(
-            match_id=data.get("match"),
+        await handle_device_results(device_id, data)
+    elif msg_type == "weight":
+        value = data.get("value")
+        if value is not None:
+            await handle_device_weight(device_id, float(value))    
+    elif msg_type == "relay_done":
+        await handle_match_relay(
+            match_id=data.get("match_id"),
             team_index=data.get("team"),
-            device_id=device_id
+            relay_pos=data.get("position")
         )
     else:
         print(f"Unknown message type from {device_id}: {data}")
+    asyncio.create_task(broadcast_matches())
 
 
 
-def handle_match_relay(match_id: int, team_index: int, device_id: str):
+STANDARD_WEIGHT = 1000  # example, adjust to your rule
+
+def _calculate_team_results(team: dict) -> dict:
+    time_sum = sum((p.get("time_seconds") or 0) for p in team["players"] if not p.get("foul"))
+    weight_sum = sum((p.get("end_weight") or 0) for p in team["players"] if not p.get("foul"))
+    return {"time": time_sum, "weight": weight_sum}
+
+
+
+async def handle_match_relay(match_id: int, team_index: int, relay_pos: int):
     match = matches_memory.get(match_id)
     if not match:
-        print(f"Match {match_id} not found")
+        print(f"[Relay] Match {match_id} not found")
         return
 
     team = match["teams"][team_index]
     players = team["players"]
 
-    current_pos = next((i for i, p in enumerate(players) if p["device_id"] == device_id), None)
-    if current_pos is None:
-        print(f"Device {device_id} not found in team {team_index}")
+    # 🔹 Validate position
+    if relay_pos < 0 or relay_pos >= len(players):
+        print(f"[Relay] Invalid relay_pos {relay_pos} for team {team_index}")
         return
 
-    if current_pos < len(players) - 1:
-        next_device_id = players[current_pos + 1]["device_id"]
-        if next_device_id in device_connections:
-            asyncio.create_task(device_connections[next_device_id].send_text(
-                json.dumps({"type": "start", "relay_pos": current_pos + 1})
-            ))
-        print(f"Relay: started next device {next_device_id}")
-    else:
+    # 🔹 Last player finished → team done
+    if relay_pos == len(players) - 1:
         team["finished"] = True
-        print(f"Team {team_index} finished relay in match {match_id}")
+        print(f"[Relay] Team {team_index} finished relay in match {match_id}")
 
+        # 🎉 Victory animation for the finishing team
+        for player in team["players"]:
+            did = player["device_id"]
+            if did in device_connections:
+                asyncio.create_task(_safe_send(
+                    device_connections[did],
+                    {"type": "victory", "team": team_index}
+                ))
+
+        # ✅ Check if all teams are finished
         if all(t.get("finished") for t in match["teams"]):
-            match["status"] = "finished"
-            team_times = [
-                sum(p.get("time_seconds") or 0 for p in t["players"])
-                for t in match["teams"]
-            ]
-            winner_index = min(range(len(team_times)), key=lambda i: team_times[i])
-            match["winner_team"] = winner_index
-            print(f"Match {match_id} finished! Winner: Team {winner_index}")
-    
+            results = [_calculate_team_results(t) for t in match["teams"]]
+
+            # Winner logic
+            winners = [i for i, r in enumerate(results) if r["weight"] >= STANDARD_WEIGHT]
+            if not winners:
+                match["status"] = "finished"
+                match["winner_team"] = None
+                print(f"[Relay] Match {match_id} finished → no winners")
+            elif len(winners) == 1:
+                match["status"] = "finished"
+                match["winner_team"] = winners[0]
+                print(f"[Relay] Match {match_id} finished → winner team {winners[0]} (only team above weight)")
+            else:
+                winner_index = min(winners, key=lambda i: results[i]["time"])
+                match["status"] = "finished"
+                match["winner_team"] = winner_index
+                print(f"[Relay] Match {match_id} finished → winner team {winner_index} (fastest valid team)")
+
+            # 📢 Notify all devices about match end
+            for t_index, t in enumerate(match["teams"]):
+                for player in t["players"]:
+                    did = player["device_id"]
+                    if did in device_connections:
+                        asyncio.create_task(_safe_send(
+                            device_connections[did],
+                            {
+                                "type": "match_end",
+                                "winner_team": match["winner_team"],
+                                "your_team": t_index,
+                                "match_id": match_id
+                            }
+                        ))
+
+async def handle_match_1v1_finish(match_id: int):
+    match = matches_memory.get(match_id)
+    if not match:
+        print(f"[1v1] Match {match_id} not found")
+        return
+
+    if match["status"] == "finished":
+        return  # already handled
+
+    teams = match["teams"]
+    if len(teams) != 2:
+        print(f"[1v1] Match {match_id} invalid team count: {len(teams)}")
+        return
+
+    # Collect results
+    results = []
+    for team in teams:
+        player = team["players"][0]  # 1 player per team in 1v1
+        time_val = player.get("time_seconds")
+        foul = player.get("foul", False)
+        results.append({
+            "device_id": player["device_id"],
+            "time": time_val,
+            "foul": foul,
+        })
+
+    # Ensure both players have submitted results
+    if any(r["time"] is None for r in results):
+        return
+
+    # Winner logic
+    if results[0]["foul"] and results[1]["foul"]:
+        winner = None
+    elif results[0]["foul"]:
+        winner = 1
+    elif results[1]["foul"]:
+        winner = 0
+    else:
+        winner = 0 if results[0]["time"] < results[1]["time"] else 1
+
+    match["status"] = "finished"
+    match["winner_team"] = winner
+
+    # Notify devices
+    for t_index, team in enumerate(teams):
+        for player in team["players"]:
+            dev_id = player["device_id"]
+            if dev_id in device_connections:
+                await _safe_send(device_connections[dev_id], {
+                    "type": "match_end",
+                    "match_id": match_id,
+                    "your_team": t_index,
+                    "winner_team": winner
+                })
+
+    asyncio.create_task(broadcast_matches())
+    print(f"[1v1] Match {match_id} finished → winner {winner}")
+
+
+async def handle_device_weight(device_id: str, weight: float):
+    """Update player's start_weight from a device and broadcast change."""
+    updated = False
+    for match_id, match_data in matches_memory.items():
+        for team in match_data["teams"]:
+            for player in team["players"]:
+                if player["device_id"] == device_id:
+                    player["start_weight"] = weight
+                    updated = True
+                    print(f"[WEIGHT] {device_id} start_weight updated to {weight} in match {match_id}")
+
+    # also mirror in device_state
+    devices_state.setdefault(device_id, {})
+    devices_state[device_id]["start_weight"] = weight
+
+    if updated:
+        asyncio.create_task(broadcast_matches())
+        await broadcast_live_event({
+            "type": "weight",
+            "device_id": device_id,
+            "start_weight": weight
+        })
+
+def _check_all_devices_ready(match_id: int) -> bool:
+    """Return True if all devices in the given match are 'ready'."""
+    match = matches_memory.get(match_id)
+    if not match:
+        return False
+
+    for team in match["teams"]:
+        for player in team["players"]:
+            if player.get("status") != "ready":
+                return False
+    return True
 
 async def handle_device_status(device_id: str, data: dict):
+    # normalize incoming fields
     status = data.get("state")
+    match_id=data.get("match_id")
     mode = data.get("mode")
     team = data.get("team")
     relay_pos = data.get("relay_pos")
     battery = data.get("battery")
 
-    print(f"Status {status} from {device_id}")
-    
-    # update memory
-    if device_id not in devices_state:
-        devices_state[device_id] = {}
+    #print(f"[LIVE] status {status} from {device_id}")
+
+    # Update device cache with full info
+    devices_state.setdefault(device_id, {})
     devices_state[device_id].update({
-        "status": status
+        "status": status,
+        "match_id":match_id,
+        "mode": mode,
+        "team": team,
+        "relay_pos": relay_pos,
+        "battery": battery,
     })
-    await broadcast_result_update()
 
-    # Update matches_memory with latest state
-    for match_id, match_data in matches_memory.items():
-        for team in match_data["teams"]:
-            for player in team["players"]:
-                if player["device_id"] == device_id:
-                    player["status"] = status  # ✅ store status in memory
-                    break
+    # Mirror status into matches_memory players if present
+    for _match_id, match_data in matches_memory.items():
+        for t in match_data["teams"]:
+            for p in t["players"]:
+                if p["device_id"] == device_id:
+                    p["status"] = status
 
-    # Broadcast to live clients
-    for ws in clients_status:
-        await ws.send_text(json.dumps({
-            "type": "status",
-            "device_id": device_id,
-            "status": status,
-            "mode": mode,
-            "team": team,
-            "relay_pos": relay_pos,
-            "battery": battery
-        }))
+# ✅ Check if all players in this match are ready
+    if status == "ready" and match_id in matches_memory:
+        if _check_all_devices_ready(match_id):
+            matches_memory[match_id]["game_ready"] = True
+            print(f"Match {match_id} is now READY (all devices).")
 
+            # Optionally notify all devices in the match
+            for team in matches_memory[match_id]["teams"]:
+                for player in team["players"]:
+                    dev_id = player["device_id"]
+                    if dev_id in device_connections:
+                        await _safe_send(device_connections[dev_id], {
+                            "type": "game_ready",
+                            "match_id": match_id
+                        })
+
+    # Broadcast to live channel
+    await broadcast_live_event({
+        "type": "status",
+        "device_id": device_id,
+        "status": status,
+        "match_id":match_id,
+        "mode": mode,
+        "team": team,
+        "relay_pos": relay_pos,
+        "battery": battery,
+    })
 
 
 async def handle_device_results(device_id: str, data: dict):
     start_weight = data.get("start_weight")
     time_seconds = data.get("time_seconds")
-    reaction_time_seconds=data.get("reaction_time_seconds")
+    reaction_time_seconds = data.get("reaction_time_seconds")
     end_weight = data.get("end_weight")
+    foul = data.get("foul", False)
+    updated = False
+    match_id = None
 
-    for match_id, match_data in matches_memory.items():
+    for _match_id, match_data in matches_memory.items():
         for team in match_data["teams"]:
             for player in team["players"]:
                 if player["device_id"] == device_id:
@@ -396,20 +654,76 @@ async def handle_device_results(device_id: str, data: dict):
                     player["time_seconds"] = time_seconds
                     player["start_weight"] = start_weight
                     player["end_weight"] = end_weight
-                    print(f"Updated {device_id} in match {match_id}")
-                    return
-    print(f"Device {device_id} not found in any active match")
+                    player["foul"] = foul
+                    updated = True
+                    match_id = _match_id
 
-    if device_id not in devices_state:
-        devices_state[device_id] = {}
+    if not updated:
+        print(f"Device {device_id} not found in any active match (storing in devices_state)")
+
+    # Store latest results in live cache too
+    devices_state.setdefault(device_id, {})
     devices_state[device_id].update({
         "reaction_time_seconds": reaction_time_seconds,
         "time_seconds": time_seconds,
         "start_weight": start_weight,
         "end_weight": end_weight
     })
-    await broadcast_result_update()
 
+    # Broadcast to live channel (public animations can react)
+    await broadcast_live_event({
+        "type": "result",
+        "device_id": device_id,
+        "reaction_time_seconds": reaction_time_seconds,
+        "time_seconds": time_seconds,
+        "start_weight": start_weight,
+        "end_weight": end_weight
+    })
+
+    if updated:
+        asyncio.create_task(broadcast_matches())
+
+        # 🔹 Call handler if match is 1v1
+        match = matches_memory.get(match_id)
+        if match and match["match_type"] == "1v1":
+            await handle_match_1v1_finish(match_id)
+
+
+# ========================
+# Dev helper: Fake live feed
+# ========================
+async def fake_status_broadcaster():
+    """Send fake status messages every 2 seconds for testing frontend."""
+    device_ids = ["ESP32-1", "ESP32-2", "ESP32-3","ESP32-4", "ESP32-5", "ESP32-6","ESP32-7", "ESP32-8", "ESP32-9", "ESP32-10"]
+    statuses = ["standby", "ready", "start", "drinking", "finish"]
+    modes=["relay","solo","1v1"]
+
+    while True:
+        if clients_live:  # only send if someone is listening
+            device_id = random.choice(device_ids)
+            payload = {
+                "type": "status",
+                "device_id": device_id,
+                "state": random.choice(statuses),   # note: incoming uses 'state'
+                "match_id": random.randint(1, 800),
+                "mode": random.choice(modes),
+                "team": random.choice(["red", "blue"]),
+                "relay_pos": random.randint(1, 4),
+                "battery": round(random.uniform(3.5, 4.2), 2)
+            }
+            # Reuse real handler to keep one code path
+            await handle_device_status(device_id, payload)
+        await asyncio.sleep(2)
+
+
+# @app.on_event("startup")
+# async def startup_event():
+#     asyncio.create_task(fake_status_broadcaster())
+
+
+# ========================
+# Run
+# ========================
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

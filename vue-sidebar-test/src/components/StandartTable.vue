@@ -45,6 +45,7 @@ const headers= computed(()=>
   font-family: Arial, Helvetica, sans-serif;
   border-collapse: collapse;
   width: 100%;
+  table-layout: fixed;
 }
 
 #customers td, #customers th {

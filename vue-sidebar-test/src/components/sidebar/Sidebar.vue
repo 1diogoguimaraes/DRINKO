@@ -16,7 +16,7 @@
 				<span class="material-icons">home</span>
 				<span class="text">Home</span>
 			</router-link>
-			<router-link to="/about" class="button">
+			<router-link to="/control" class="button">
 				<span class="material-icons">gamepad</span>
 				<span class="text">Contol</span>
 			</router-link>

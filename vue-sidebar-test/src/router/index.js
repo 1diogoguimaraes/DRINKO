@@ -13,8 +13,8 @@ const router = createRouter({
 			component: Home
 		},
 		{
-			path: '/about',
-			component: () => import('../views/About.vue')
+			path: '/control',
+			component: () => import('../views/Control.vue')
 		},
 		{
 			path: '/table',

@@ -6,11 +6,13 @@ from typing import List, Optional
 
 class PlayerInMemory(BaseModel):
     device_id: str
-    status:str
+    status: Optional[str] = "standby"
     player_name: Optional[str] = None
+    reaction_time_seconds: Optional[float] = None
     time_seconds: Optional[float] = None
     start_weight: Optional[float] = None
     end_weight: Optional[float] = None
+    foul:Optional[bool]=False
 
 class TeamInMemory(BaseModel):
     team_name: Optional[str] = None
