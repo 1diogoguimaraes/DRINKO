@@ -1,6 +1,6 @@
-#crud.py
 from sqlalchemy.orm import Session
-from . import models,schemas
+from datetime import datetime
+from . import models, schemas
 
 
 def create_match(db: Session, match_type: str) -> models.Match:
@@ -19,42 +19,41 @@ def finalize_match(db: Session, match_data: dict, match_id: int):
     for team_info in match_data["teams"]:
         team = None
 
-        # Enforce relay teams must have a name
-        if match_data["match_type"] == "relay":
-            if not team_info.get("team_name"):
-                raise ValueError("Relay teams must have a name")
-            team = db.query(models.Team).filter(
-                models.Team.name == team_info["team_name"]
-            ).first()
+        # --- TEAM HANDLING ---
+        team_name = team_info.get("team_name")
 
-        # Create team if not found (or if solo/1v1)
+        # Relay teams must have a name
+        if match_data["match_type"] == "relay" and not team_name:
+            raise ValueError("Relay teams must have a name")
+
+        if team_name:
+            team = db.query(models.Team).filter(models.Team.name == team_name).first()
+
+        # Create team if not found
         if not team:
             team = models.Team(
                 match_id=match_id,
-                name=team_info.get("team_name")  # could be None for solo/1v1
+                name=team_name
             )
             db.add(team)
-            db.commit()
-            db.refresh(team)
+            db.flush()  # ✅ safer than multiple commits
 
+        # --- PLAYER HANDLING ---
         for player_info in team_info["players"]:
-            player = None
+            player_name = player_info.get("player_name") or player_info["device_id"]
 
-            if player_info.get("player_name"):
-                player = db.query(models.Player).filter(
-                    models.Player.name == player_info["player_name"]
-                ).first()
+            # Try to find existing player by name
+            player = db.query(models.Player).filter(models.Player.name == player_name).first()
 
             if not player:
                 player = models.Player(
-                    name=player_info.get("player_name") or player_info["device_id"],
-                    team_id=team.id if team.name else None  # only link if team has a name
+                    name=player_name,
+                    team_id=team.id if team.name else None
                 )
                 db.add(player)
-                db.commit()
-                db.refresh(player)
+                db.flush()
 
-            # Add result if we already have a time
+            # --- RESULT HANDLING ---
             if player_info.get("time_seconds") is not None:
                 result = models.Result(
                     match_id=match_id,
@@ -63,13 +62,13 @@ def finalize_match(db: Session, match_data: dict, match_id: int):
                     reaction_time_seconds=player_info["reaction_time_seconds"],
                     time_seconds=player_info["time_seconds"],
                     start_weight=player_info.get("start_weight"),
-                    end_weight=player_info.get("end_weight")
+                    end_weight=player_info.get("end_weight"),
+                    foul=player_info.get("foul"),
+                    date=datetime.now().strftime("%d-%m-%Y")  # ✅ auto date
                 )
                 db.add(result)
-                db.commit()
 
+    # ✅ Commit once at the end
+    db.commit()
     db.refresh(match)
     return match
-
-
-

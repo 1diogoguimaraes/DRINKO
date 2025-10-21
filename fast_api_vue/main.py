@@ -1,16 +1,28 @@
 import asyncio
 import random
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 import json
 from typing import Dict, Any
 
 from DB import crud, models, schemas
-from DB.database import engine, Base, SessionLocal
+from DB.database import engine, Base, SessionLocal,get_db
+from routers import data
 
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
+
+app.include_router(data.router)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173","http://127.0.0.1:8000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 # Memory Stores
 matches_memory: Dict[int, dict] = {}            # whole match structures (control + public)
@@ -29,13 +41,6 @@ device_registry = {
 }
 
 
-# Dependency
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 
 @app.get("/")
@@ -183,7 +188,25 @@ async def websocket_device(websocket: WebSocket, device_id: str):
                 import traceback
                 traceback.print_exc()
     finally:
+        print(f"[DISCONNECT] Cleaning up {device_id}")
         device_connections.pop(device_id, None)
+        devices_state.pop(device_id, None)
+
+        # Also clean up inside matches_memory (optional but cleaner)
+        for match_id, match_data in matches_memory.items():
+            for team in match_data["teams"]:
+                for player in team["players"]:
+                    if player["device_id"] == device_id:
+                        player["status"] = "disconnected"
+
+        # Broadcast to update UI
+        asyncio.create_task(broadcast_live_event({
+            "type": "status",
+            "device_id": device_id,
+            "status": "disconnected"
+        }))
+        asyncio.create_task(broadcast_matches())
+
 
 
 
@@ -196,6 +219,90 @@ async def websocket_device(websocket: WebSocket, device_id: str):
 # ========================
 # REST: matches
 # ========================
+@app.post("/devices/reset")
+async def reset_all_devices():
+    """Send {"type": "reset"} to all connected devices, regardless of match."""
+    if not device_connections:
+        return {"status": "no_devices_connected"}
+
+    for dev_id, ws in device_connections.items():
+        asyncio.create_task(_safe_send(ws, {"type": "reset"}))
+        print(f"[RESET] Sent reset to {dev_id}")
+
+    return {"status": "reset_sent", "device_count": len(device_connections)}
+
+@app.post("/matches/reset")
+async def reset_all_matches():
+    """Delete all matches from memory and notify devices."""
+    for match in matches_memory.values():
+        for team in match["teams"]:
+            for player in team["players"]:
+                dev_id = player["device_id"]
+                if dev_id in device_connections:
+                    await _safe_send(device_connections[dev_id], {"type": "reset"})
+    
+    matches_memory.clear()  # <-- This deletes everything in memory
+    devices_state.clear()   # Clear live device states too
+    asyncio.create_task(broadcast_matches())  # Notify frontend
+    
+    return {"status": "all_matches_deleted"}
+
+# -----------------
+# Delete a single match
+# -----------------
+@app.delete("/matches/{match_id}")
+async def delete_match(match_id: int):
+    match = matches_memory.get(match_id)
+    if not match:
+        raise HTTPException(status_code=404, detail="Match not found in memory")
+
+    # Notify devices in this match to reset
+    for team in match["teams"]:
+        for player in team["players"]:
+            dev_id = player["device_id"]
+            if dev_id in device_connections:
+                await _safe_send(device_connections[dev_id], {"type": "reset"})
+
+    # Remove match from memory
+    matches_memory.pop(match_id, None)
+
+    # Notify frontend
+    asyncio.create_task(broadcast_matches())
+    return {"status": "deleted", "match_id": match_id}
+
+
+# -----------------
+# Resend match config to devices
+# -----------------
+@app.post("/matches/{match_id}/resend")
+async def resend_match(match_id: int):
+    match = matches_memory.get(match_id)
+    if not match:
+        raise HTTPException(status_code=404, detail="Match not found in memory")
+
+    # Resend config to each device in the match
+    for team_index, team in enumerate(match["teams"]):
+        for player_index, player in enumerate(team["players"]):
+            dev_id = player["device_id"]
+            if dev_id in device_connections:
+                next_device_mac = None
+                if match["match_type"] == "relay" and player_index < len(team["players"]) - 1:
+                    next_device_id = team["players"][player_index + 1]["device_id"]
+                    next_device_mac = device_registry.get(next_device_id, {}).get("mac")
+
+                payload = {
+                    "type": "config",
+                    "match_id": match_id,
+                    "match_type": match["match_type"],
+                    "team": team_index,
+                    "position": player_index,
+                    "next_device": next_device_mac
+                }
+                await _safe_send(device_connections[dev_id], payload)
+
+    return {"status": "resent", "match_id": match_id}
+
+
 @app.post("/matches/", response_model=schemas.MatchInResponse)
 async def create_match(match: schemas.MatchInMemory, db: Session = Depends(get_db)):
     db_match = crud.create_match(db, match.match_type)
@@ -398,7 +505,7 @@ async def handle_device_message(device_id: str, message: str):
     elif msg_type == "results":
         await handle_device_results(device_id, data)
     elif msg_type == "weight":
-        value = data.get("value")
+        value = data.get("weight")
         if value is not None:
             await handle_device_weight(device_id, float(value))    
     elif msg_type == "relay_done":
@@ -544,6 +651,45 @@ async def handle_match_1v1_finish(match_id: int):
     print(f"[1v1] Match {match_id} finished → winner {winner}")
 
 
+async def handle_match_solo_finish(match_id: int):
+    match = matches_memory.get(match_id)
+    if not match:
+        print(f"[SOLO] Match {match_id} not found")
+        return
+
+    if match["status"] == "finished":
+        return  # already handled
+
+    team = match["teams"][0]
+    player = team["players"][0]
+
+    # Ensure we have result data
+    if player.get("time_seconds") is None:
+        print(f"[SOLO] Player for match {match_id} has no result yet")
+        return
+
+    # Mark match finished
+    match["status"] = "finished"
+    match["winner_team"] = 0  # Only one team, always "winner"
+
+    if player.get("foul"):
+        device_winning=1
+    else:
+        device_winning=0
+    # Notify the single device
+    dev_id = player["device_id"]
+    if dev_id in device_connections:
+        await _safe_send(device_connections[dev_id], {
+            "type": "match_end",
+            "match_id": match_id,
+            "your_team": device_winning,
+            "winner_team": 0
+        })
+
+    asyncio.create_task(broadcast_matches())
+    print(f"[SOLO] Match {match_id} finished → device {dev_id}")
+
+
 async def handle_device_weight(device_id: str, weight: float):
     """Update player's start_weight from a device and broadcast change."""
     updated = False
@@ -683,10 +829,19 @@ async def handle_device_results(device_id: str, data: dict):
     if updated:
         asyncio.create_task(broadcast_matches())
 
-        # 🔹 Call handler if match is 1v1
+                # 🔹 Call handler depending on match type
         match = matches_memory.get(match_id)
-        if match and match["match_type"] == "1v1":
+        if not match:
+            return
+
+        if match["match_type"] == "1v1":
             await handle_match_1v1_finish(match_id)
+        elif match["match_type"] == "solo":
+            await handle_match_solo_finish(match_id)
+        elif match["match_type"] == "relay":
+            # (Relay finishes are handled separately by relay_done messages)
+            pass
+
 
 
 # ========================
@@ -716,9 +871,164 @@ async def fake_status_broadcaster():
         await asyncio.sleep(2)
 
 
-# @app.on_event("startup")
-# async def startup_event():
-#     asyncio.create_task(fake_status_broadcaster())
+import asyncio
+import json
+
+# Example pool of device IDs
+FAKE_DEVICES = [f"ESP-{i:03d}" for i in range(1, 11)]
+
+# Fixed config for testing
+DEVICE_CONFIG = {
+    "ESP-001": {"mode": "relay", "team": 0, "relay_pos": 0},
+    "ESP-002": {"mode": "relay", "team": 0, "relay_pos": 1},
+    "ESP-003": {"mode": "relay", "team": 1, "relay_pos": 0},
+    "ESP-004": {"mode": "relay", "team": 1, "relay_pos": 1},
+    "ESP-005": {"mode": "1v1",   "team": 0, "relay_pos": None},
+    "ESP-006": {"mode": "1v1",   "team": 1, "relay_pos": None},
+    "ESP-007": {"mode": "solo",  "team": 0, "relay_pos": None},
+    "ESP-008": {"mode": "solo",  "team": 0, "relay_pos": None},
+    "ESP-009": {"mode": "solo",  "team": 0, "relay_pos": None},
+    "ESP-010": {"mode": "solo",  "team": 0, "relay_pos": None},
+}
+
+# Fixed values for repeatable test
+FIXED_STATUS = "ready"
+FIXED_BATTERY = 3.95
+FIXED_START_WEIGHT = 980
+FIXED_END_WEIGHT = 1010
+FIXED_TIME = 6.50
+FIXED_REACTION = 0.30
+FIXED_FOUL = False
+
+async def simulate_devices():
+    """
+    Simulate 10 ESP devices with fixed values, also filling matches_memory.
+    """
+    from main import devices_state, matches_memory, handle_device_status, handle_device_message
+
+    match_id = 1
+    # Build one fake match with teams & players
+    matches_memory[match_id] = {
+  "match_type": "relay",
+  "teams": [
+    {
+      "team_name": "",
+      "finished":False,
+      "players": [
+        {
+          "device_id": "ESP-001",
+          "status": "none",
+          "player_name": "",
+          "time_seconds": "",
+          "start_weight": "",
+          "end_weight": "",
+          "foul": False
+        },        
+        {
+          "device_id": "ESP-002",
+          "status": "none",
+          "player_name": "",
+          "time_seconds": "",
+          "start_weight": "",
+          "end_weight": "",
+          "foul": False
+        }
+      ]
+    },{
+      "team_name": "",
+      "finished":False,
+      "players": [
+        {
+          "device_id": "ESP-003",
+          "status": "none",
+          "player_name": "",
+          "time_seconds": "",
+          "start_weight": "",
+          "end_weight": "",
+          "foul": False
+        },        
+        {
+          "device_id": "ESP-004",
+          "status": "none",
+          "player_name": "",
+          "time_seconds": "",
+          "start_weight": "",
+          "end_weight": "",
+          "foul": False
+        }
+      ]
+    }
+  ]
+}
+
+
+    while True:
+        for dev, cfg in DEVICE_CONFIG.items():
+            # 🔹 1) Status update
+            status_payload = {
+                "type": "status",
+                "state": FIXED_STATUS,
+                "match_id": match_id,
+                "mode": cfg["mode"],
+                "team": cfg["team"],
+                "relay_pos": cfg["relay_pos"],
+                "battery": FIXED_BATTERY,
+            }
+            await handle_device_status(dev, status_payload)
+
+            # 🔹 2) Fake weight
+            weight_payload = {"type": "weight", "value": FIXED_START_WEIGHT}
+            await handle_device_message(dev, json.dumps(weight_payload))
+
+            # 🔹 3) Fake result
+            result_payload = {
+                "type": "results",
+                "start_weight": FIXED_START_WEIGHT,
+                "end_weight": FIXED_END_WEIGHT,
+                "time_seconds": FIXED_TIME,
+                "reaction_time_seconds": FIXED_REACTION,
+                "foul": FIXED_FOUL,
+            }
+            await handle_device_message(dev, json.dumps(result_payload))
+
+            # 🔹 Keep devices_state aligned
+            devices_state[dev] = {
+                "status": FIXED_STATUS,
+                "match_id": match_id,
+                "mode": cfg["mode"],
+                "team": cfg["team"],
+                "relay_pos": cfg["relay_pos"],
+                "battery": FIXED_BATTERY,
+                "start_weight": FIXED_START_WEIGHT,
+                "end_weight": FIXED_END_WEIGHT,
+                "time_seconds": FIXED_TIME,
+                "reaction_time_seconds": FIXED_REACTION,
+                "foul": FIXED_FOUL,
+            }
+
+        await asyncio.sleep(5)  # update every 5s
+
+
+
+@app.get("/data/{table_name}")
+def get_table_data(table_name: str, db: Session = Depends(get_db)):
+    mapping = {
+        "matches": models.Match,
+        "teams": models.Team,
+        "players": models.Player,
+        "results": models.Result,
+    }
+    model = mapping.get(table_name)
+    if not model:
+        raise HTTPException(status_code=404, detail="Table not found")
+    
+    rows = db.query(model).all()
+    # Convert ORM objects to dicts
+    return [serialize(r) for r in rows]
+
+
+def serialize(obj):
+    return {c.name: getattr(obj, c.name) for c in obj.__table__.columns}
 
 
 # ========================
@@ -727,3 +1037,8 @@ async def fake_status_broadcaster():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
+
+
+

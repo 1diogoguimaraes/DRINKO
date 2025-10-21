@@ -41,6 +41,8 @@ class PlayerCreate(BaseModel):
     time_seconds: Optional[float] = None
     start_weight: Optional[float] = None
     end_weight: Optional[float] = None
+    date: Optional[str] = None  # ✅ new optional field
+
 
 class TeamCreate(BaseModel):
     team_name: Optional[str] = None
