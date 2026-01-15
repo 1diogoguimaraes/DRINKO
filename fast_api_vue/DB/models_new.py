@@ -19,7 +19,7 @@ class Match(Base):
     winner_player_id = Column(Integer, ForeignKey("players.id"), nullable=True)
 
     # Relationships
-    teams = relationship("Team", back_populates="match", cascade="all, delete-orphan",foreign_keys="Team.match_id")
+    teams = relationship("Team", back_populates="match", cascade="all, delete-orphan")
     results = relationship("Result", back_populates="match", cascade="all, delete-orphan")
     player_team_links = relationship("PlayerTeamAssociation", back_populates="match", cascade="all, delete-orphan")
 
@@ -32,12 +32,12 @@ class Team(Base):
 
     id = Column(Integer, primary_key=True)
     match_id = Column(Integer, ForeignKey("matches.id"))
-    name = Column(String, nullable=False,unique=True)
+    name = Column(String, nullable=False)
 
     # Each match can have its own team names
     __table_args__ = (UniqueConstraint("match_id", "name", name="uix_team_match_name"),)
 
-    match = relationship("Match", back_populates="teams",foreign_keys=[match_id])
+    match = relationship("Match", back_populates="teams")
     player_links = relationship("PlayerTeamAssociation", back_populates="team", cascade="all, delete-orphan")
     results = relationship("Result", back_populates="team", cascade="all, delete-orphan")
 

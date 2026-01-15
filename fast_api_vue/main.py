@@ -17,7 +17,7 @@ app = FastAPI()
 app.include_router(data.router)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173","http://127.0.0.1:8000"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -37,6 +37,13 @@ device_registry = {
     "ESP-001": {"mac": "84:1F:E8:16:89:08"},
     "ESP-002": {"mac": "84:1F:E8:17:2E:44"},
     "ESP-003": {"mac": "84:1F:E8:1A:B2:F8"},
+    "ESP-004": {"mac": "84:1F:E8:16:82:A8"},
+    "ESP-005": {"mac": "84:1F:E8:1B:3B:68"},
+    "ESP-006": {"mac": "6C:C8:40:5D:4E:8C"},
+    "ESP-007": {"mac": "44:1D:64:E3:34:E0"},
+    "ESP-008": {"mac": "6C:C8:40:5C:67:18"},
+    "ESP-009": {"mac": "6C:C8:40:5D:1A:00"},
+    "ESP-010": {"mac": "44:1D:64:E3:C9:40"},
     # ... all your 10 devices
 }
 
@@ -148,21 +155,36 @@ import traceback
 
 @app.websocket("/ws/device/{device_id}")
 async def websocket_device(websocket: WebSocket, device_id: str):
+    # 1. Force close old connection to prevent ghosts
+    if device_id in device_connections:
+        try:
+            await device_connections[device_id].close()
+        except:
+            pass
+        device_connections.pop(device_id, None)
+
     await websocket.accept()
     device_connections[device_id] = websocket
     print(f"Device {device_id} connected via WS")
 
-    # 🔹 Replay config if this device already belongs to a match
+    # 2. Restore Config & State
+    device_restored = False
+    
     for match_id, match in matches_memory.items():
+        # Optional: Skip finished matches to prevent rejoining old ones
+        if match.get("status") == "finished":
+            continue
+
         for team_index, team in enumerate(match["teams"]):
             for relay_pos, player in enumerate(team["players"]):
                 if player["device_id"] == device_id:
+                    
+                    # A. Send Configuration
                     players = team["players"]
-                    next_device = None
+                    next_device_mac = None
                     if relay_pos < len(players) - 1:
                         next_device_id = players[relay_pos + 1]["device_id"]
-                        next_device = device_registry.get(next_device_id, {}).get("mac")
-
+                        next_device_mac = device_registry.get(next_device_id, {}).get("mac")
 
                     await _safe_send(websocket, {
                         "type": "config",
@@ -170,36 +192,70 @@ async def websocket_device(websocket: WebSocket, device_id: str):
                         "match_type": match["match_type"],
                         "team": team_index,
                         "position": relay_pos,
-                        "next_device": next_device
+                        "next_device": next_device_mac
                     })
+
+                    match_status = match.get("status", "waiting")
+                    
+                    # B. Restore Previous Results (if device finished before disconnect)
+                    if player.get("time_seconds") is not None:
+                        await _safe_send(websocket, {
+                            "type": "restore_results",
+                            "start_weight": player.get("start_weight", 0),
+                            "end_weight": player.get("end_weight", 0),
+                            "time_seconds": player.get("time_seconds", 0),
+                            "reaction_time_seconds": player.get("reaction_time_seconds", 0),
+                            "foul": player.get("foul", False)
+                        })
+
+                    # C. Restore Active Game State
+                    elif match_status == "running":
+                        print(f"Restoring {device_id} to RUNNING match {match_id}")
+                        if player.get("start_weight"):
+                            await _safe_send(websocket, {
+                                "type": "restore_weight",
+                                "start_weight": player["start_weight"]
+                            })
+
+                        # Force Lock AND Start
+                        # We send both to ensure device transitions READY -> LOCKED -> START
+                        await _safe_send(websocket, {"type": "game_ready", "match_id": match_id})
+                        await _safe_send(websocket, {"type": "start"})
+                    
+                    # D. Restore Waiting State (Device was ready, now reconnects)
+                    elif match_status == "waiting":
+                        # If the match was already flagged as ready (all players were present), re-send lock
+                        if match.get("game_ready", False):
+                             await _safe_send(websocket, {"type": "game_ready", "match_id": match_id})
+
+                    device_restored = True
                     break
+            if device_restored: break
+        if device_restored: break
 
     try:
         while True:
+            # ... (keep existing message handling loop) ...
             try:
                 text = await websocket.receive_text()
-                print(f"[FROM {device_id}] {text}")
                 await handle_device_message(device_id, text)
             except WebSocketDisconnect:
-                print(f"Device {device_id} disconnected")
                 break
             except Exception as e:
                 print(f"Error handling message from {device_id}: {e}")
-                import traceback
-                traceback.print_exc()
+                break
     finally:
         print(f"[DISCONNECT] Cleaning up {device_id}")
         device_connections.pop(device_id, None)
         devices_state.pop(device_id, None)
-
-        # Also clean up inside matches_memory (optional but cleaner)
+        
+        # Mark as disconnected in memory
         for match_id, match_data in matches_memory.items():
             for team in match_data["teams"]:
                 for player in team["players"]:
                     if player["device_id"] == device_id:
                         player["status"] = "disconnected"
-
-        # Broadcast to update UI
+        
         asyncio.create_task(broadcast_live_event({
             "type": "status",
             "device_id": device_id,
@@ -318,7 +374,7 @@ async def create_match(match: schemas.MatchInMemory, db: Session = Depends(get_d
 
             # 🔹 Get the next device MAC if relay and not last player
             next_device_mac = None
-            if match.match_type == "relay" and player_index < len(team.players) - 1:
+            if match.match_type in ["relay", "solo_relay"] and player_index < len(team.players) - 1:
                 next_device_id = team.players[player_index + 1].device_id
                 # 🔹 Look up its MAC address
                 next_device_mac = device_registry.get(next_device_id, {}).get("mac")
@@ -369,6 +425,9 @@ async def start_match(match_id: int):
         await _start_1v1(match_id)
     elif match_type == "relay":
         await _start_relay(match_id)
+    elif match_type == "solo_relay":
+        await _start_solo_relay(match_id)
+
     else:
         raise HTTPException(status_code=400, detail="Unknown match type")
 
@@ -428,6 +487,34 @@ async def _start_relay(match_id: int):
 
     print(f"[Relay] Match {match_id} started, all players notified")
 
+async def _start_solo_relay(match_id: int):
+    match = matches_memory[match_id]
+    team = match["teams"][0]
+    players = team["players"]
+
+    for relay_pos, player in enumerate(players):
+        dev_id = player["device_id"]
+        if dev_id not in device_connections:
+            continue
+
+        if relay_pos == 0:
+            # First device starts
+            await _safe_send(device_connections[dev_id], {
+                "type": "start",
+                "relay_pos": relay_pos,
+                "team": 0,
+                "match_id": match_id
+            })
+        else:
+            # Others wait in relay chain
+            await _safe_send(device_connections[dev_id], {
+                "type": "in_relay",
+                "relay_pos": relay_pos,
+                "team": 0,
+                "match_id": match_id
+            })
+
+    print(f"[SoloRelay] Match {match_id} started with {len(players)} devices")
 
 
 
@@ -534,6 +621,11 @@ async def handle_match_relay(match_id: int, team_index: int, relay_pos: int):
     if not match:
         print(f"[Relay] Match {match_id} not found")
         return
+    
+    match_type = match["match_type"]
+    if match_type not in ["relay", "solo_relay"]:
+        print(f"[Relay] Ignored relay_done for non-relay type {match_type}")
+        return
 
     team = match["teams"][team_index]
     players = team["players"]
@@ -557,25 +649,31 @@ async def handle_match_relay(match_id: int, team_index: int, relay_pos: int):
                     {"type": "victory", "team": team_index}
                 ))
 
-        # ✅ Check if all teams are finished
         if all(t.get("finished") for t in match["teams"]):
             results = [_calculate_team_results(t) for t in match["teams"]]
 
-            # Winner logic
-            winners = [i for i, r in enumerate(results) if r["weight"] >= STANDARD_WEIGHT]
-            if not winners:
+            if match_type == "solo_relay":
+                # Just mark finished, no competition between teams
                 match["status"] = "finished"
-                match["winner_team"] = None
-                print(f"[Relay] Match {match_id} finished → no winners")
-            elif len(winners) == 1:
-                match["status"] = "finished"
-                match["winner_team"] = winners[0]
-                print(f"[Relay] Match {match_id} finished → winner team {winners[0]} (only team above weight)")
+                match["winner_team"] = 0
+                print(f"[SoloRelay] Match {match_id} finished (one-team relay)")
             else:
-                winner_index = min(winners, key=lambda i: results[i]["time"])
-                match["status"] = "finished"
-                match["winner_team"] = winner_index
-                print(f"[Relay] Match {match_id} finished → winner team {winner_index} (fastest valid team)")
+                # Normal relay winner logic
+                winners = [i for i, r in enumerate(results) if r["weight"] >= STANDARD_WEIGHT]
+                if not winners:
+                    match["status"] = "finished"
+                    match["winner_team"] = None
+                    print(f"[Relay] Match {match_id} finished → no winners")
+                elif len(winners) == 1:
+                    match["status"] = "finished"
+                    match["winner_team"] = winners[0]
+                    print(f"[Relay] Match {match_id} finished → winner team {winners[0]} (only team above weight)")
+                else:
+                    winner_index = min(winners, key=lambda i: results[i]["time"])
+                    match["status"] = "finished"
+                    match["winner_team"] = winner_index
+                    print(f"[Relay] Match {match_id} finished → winner team {winner_index} (fastest valid team)")
+
 
             # 📢 Notify all devices about match end
             for t_index, t in enumerate(match["teams"]):
@@ -591,6 +689,10 @@ async def handle_match_relay(match_id: int, team_index: int, relay_pos: int):
                                 "match_id": match_id
                             }
                         ))
+
+
+
+
 
 async def handle_match_1v1_finish(match_id: int):
     match = matches_memory.get(match_id)
@@ -714,14 +816,15 @@ async def handle_device_weight(device_id: str, weight: float):
         })
 
 def _check_all_devices_ready(match_id: int) -> bool:
-    """Return True if all devices in the given match are 'ready'."""
+    """Return True if all devices are 'ready' OR already 'locked'."""
     match = matches_memory.get(match_id)
     if not match:
         return False
 
     for team in match["teams"]:
         for player in team["players"]:
-            if player.get("status") != "ready":
+            # Allow 'locked' because other devices might already be waiting
+            if player.get("status") not in ["ready", "locked"]:
                 return False
     return True
 
@@ -838,7 +941,7 @@ async def handle_device_results(device_id: str, data: dict):
             await handle_match_1v1_finish(match_id)
         elif match["match_type"] == "solo":
             await handle_match_solo_finish(match_id)
-        elif match["match_type"] == "relay":
+        elif match["match_type"] in ["relay", "solo_relay"]:
             # (Relay finishes are handled separately by relay_done messages)
             pass
 

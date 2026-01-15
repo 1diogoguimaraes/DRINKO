@@ -200,6 +200,64 @@
 						</div>
 					</div>
 				</div>
+				<!-- Solo Relay -->
+				<div class="card">
+					<h2 class="card-title">Solo Relay</h2>
+					<!-- ✅ SOLO RELAY TABLE -->
+					<div v-for="(devices, matchId) in soloRelayByMatch" :key="matchId" class="match-section">
+						<h3 class="match-header">
+							<span>Match {{ matchId }}</span>
+							<div class="match-actions">
+								<button class="btn btn-play" :disabled="!allLocked(devices)"
+									@click="playMatch(matchId, 'relay')">▶ PLAY</button>
+								<button class="btn btn-edit" @click="openEditModal(String(matchId))">✎ EDIT</button>
+								<button class="btn btn-finalize" @click="finalizeMatch(matchId)">✔ FINALIZE</button>
+								<button class="btn btn-delete" @click="deleteMatch(matchId)">DELETE</button>
+								<button class="btn btn-resend" @click="resendMatch(matchId)">RESEND</button>
+							</div>
+						</h3>
+
+						<div class="teams-grid">
+							<div v-for="team in [0]" :key="team" class="team-card">
+								<h4 class="team-name">
+									{{devices.find(d => d.team === team)?.team_name ?? `Team ${team}`}}
+								</h4>
+
+								<table class="team-table">
+									<thead>
+										<tr>
+											<th class="table-header">Info</th>
+											<th v-for="d in devices.filter(x => x.team === team)" :key="d.device_id"
+												class="table-header">
+												{{ d.player_name ?? 'Unnamed' }}
+												<div class="device-id">{{ d.device_id }}</div>
+											</th>
+										</tr>
+									</thead>
+									<tbody>
+										<tr v-for="row in ['start_weight', 'end_weight', 'reaction_time_seconds', 'time_seconds', 'foul']"
+											:key="row" class="table-row">
+											<td class="table-label">{{ row.replace('_', ' ') }}</td>
+											<td v-for="d in devices.filter(x => x.team === team)"
+												:key="d.device_id + row" class="table-cell">
+												<span v-if="row !== 'foul'">{{ d[row] ?? '-' }}</span>
+												<span v-else>
+													<svg v-if="d.foul" xmlns="http://www.w3.org/2000/svg"
+														class="foul-svg" fill="none" viewBox="0 0 24 24"
+														stroke="currentColor">
+														<path stroke-linecap="round" stroke-linejoin="round"
+															stroke-width="2"
+															d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+													</svg>
+												</span>
+											</td>
+										</tr>
+									</tbody>
+								</table>
+							</div>
+						</div>
+					</div>
+				</div>
 			</div>
 
 			<!-- RIGHT SIDE: Live Table -->
@@ -219,7 +277,9 @@
 					<option value="solo">Solo</option>
 					<option value="1v1">1v1</option>
 					<option value="relay">Relay</option>
+					<option value="solo_relay">Solo Relay</option>
 				</select>
+
 
 				<!-- Dynamic device selection -->
 				<div v-if="newMatchType === 'solo'" class="device-selection">
@@ -283,6 +343,19 @@
 						</div>
 					</div>
 				</div>
+				<!-- Solo Relay layout -->
+				<div v-else-if="newMatchType === 'solo_relay'" class="teams-selection">
+					<div>
+						<h3 class="team-header team-a">Team</h3>
+						<div class="device-grid-center">
+							<button v-for="d in unassigned" :key="'SR-' + d.device_id"
+								@click="assignToTeam(d.device_id, 0)" :class="teamButtonClass(d.device_id, 0)">
+								{{ d.device_id }}
+							</button>
+						</div>
+					</div>
+				</div>
+
 
 				<!-- Error -->
 				<p v-if="validationError" class="error-message">{{ validationError }}</p>
@@ -578,7 +651,27 @@ const relayByMatch = computed(() => {
 	return result
 })
 
-
+const soloRelayByMatch = computed(() => {
+	const result = {}
+	for (const [matchId, match] of Object.entries(matchesMemory.value)) {
+		if (match.match_type === "solo_relay") {
+			const players = []
+			match.teams.forEach((team, teamIndex) => {
+				const teamName = team.team_name ?? `Team ${teamIndex}`
+				team.players.forEach((p) => {
+					players.push({
+						...p,
+						team: teamIndex,
+						team_name: teamName,
+						relay_pos: p.relay_pos ?? 0
+					})
+				})
+			})
+			result[matchId] = players
+		}
+	}
+	return result
+})
 
 function allLocked(devices) {
 	return devices.length > 0 && devices.every((d) => d.status === 'locked')
@@ -722,6 +815,10 @@ function isDisabled(deviceId) {
 		// max 10 (5 per team)
 		return selectedDevices.value.length >= 10 && !selectedDevices.value.includes(deviceId)
 	}
+	if (newMatchType.value === 'solo_relay') {
+		// max 5 (5 per team)
+		return selectedDevices.value.length >= 5 && !selectedDevices.value.includes(deviceId)
+	}
 	return false
 }
 
@@ -749,8 +846,15 @@ async function createMatch() {
 	if (newMatchType.value === 'relay') {
 		const a = teamAssignments.value[0].length
 		const b = teamAssignments.value[1].length
-		if (!((a === 2 && b === 2) || (a === 5 && b === 5))) {
-			validationError.value = 'Relay must have 2 or 5 devices per team.'
+		if (!((a === 2 && b === 2) || (a === 3 && b === 3) || (a === 4 && b === 4) || (a === 5 && b === 5))) {
+			validationError.value = 'Relay must have 2,3,4 or 5 devices per team.'
+			return
+		}
+	}
+	if (newMatchType.value === 'solo_relay') {
+		const a = teamAssignments.value[0].length
+		if (!((a === 2 || a === 3 || a === 4 || a === 5))) {
+			validationError.value = 'Solo Relay must have 2,3,4 or 5 devices.'
 			return
 		}
 	}
@@ -758,7 +862,7 @@ async function createMatch() {
 	// --- Build payload & send ---
 	try {
 		const payload = buildMatchPayload(newMatchType.value, devices)
-
+		console.log(payload)
 		const res = await fetch('http://localhost:8000/matches/', {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
@@ -809,6 +913,22 @@ function buildMatchPayload(type, devices) {
 			]
 		}
 	}
+	if (type === 'solo_relay') {
+		return {
+			match_type: 'solo_relay',
+			teams: [
+				{
+					team_name: null,
+					finished: false,
+					players: devices.map((deviceId, index) => ({
+						...buildPlayer(deviceId),
+						relay_pos: index // assign relay order
+					}))
+				}
+			]
+		}
+	}
+
 }
 
 // --- Edit Modal State ---
@@ -1097,7 +1217,7 @@ function teamButtonClass(deviceId, team) {
 	padding: 1rem;
 	background: #fff;
 	box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
-	overflow-y: auto;
+	/*overflow-y: auto;*/
 	height: 100%;
 }
 
@@ -1153,6 +1273,7 @@ function teamButtonClass(deviceId, team) {
 	background-color: #111827;
 	color: #f3f4f6;
 	border-radius: 0.5rem;
+
 }
 
 .data-table thead {
@@ -1234,11 +1355,15 @@ function teamButtonClass(deviceId, team) {
 	font-size: 0.875rem;
 	text-align: center;
 	border-collapse: collapse;
+	background-color: #111827;
+	color: #f3f4f6;
 }
 
 .team-table thead {
 	background-color: #1f2937;
+	color: #d1d5db;
 }
+
 
 /* Modal */
 .modal {

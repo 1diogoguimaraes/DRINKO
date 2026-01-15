@@ -98,6 +98,8 @@ function getCellClass(key, value) {
   font-family: 'Fira sans', sans-serif;
   border-collapse: collapse;
   width: 100%;
+  table-layout: fixed;
+  /* ✅ Force equal column widths */
   font-size: 0.875rem;
   text-align: center;
   background-color: #111827;
@@ -134,17 +136,42 @@ function getCellClass(key, value) {
   border-top: 1px solid #374151;
 }
 
+.data-table td,
+.data-table th {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+
+
 /* Status colors */
 .status-connected {
   color: #10b981;
   font-weight: 600;
 }
 
-.status-locked {
+.status-standby {
   color: #06b6d4;
   font-weight: 600;
 }
 
+.status-locked {
+  color: #ef4444;
+  font-weight: 600;
+}
+
+.status-cup {
+  color: #10b981;
+  font-weight: 600;
+}
+
+.status-invalid_cup {
+  color: #ef4444;
+  font-weight: 600;
+}
+
+/*#06b6d4*/
 .status-active {
   color: #ef4444;
   font-weight: 600;

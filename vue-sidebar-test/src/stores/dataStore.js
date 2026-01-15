@@ -12,12 +12,26 @@ export const useDataStore = defineStore('dataStore', () => {
   const playerNames = ref([])
   const teamNames = ref([])
 
+  // ✅ NEW: available tables (optional for your UI)
+  const availableTables = [
+    'matches',
+    'teams',
+    'players',
+    'results',
+    'player_team_associations', // ← include new table
+  ]
+
   async function fetchData() {
-    const res = await axios.get(`http://127.0.0.1:8000/data/${tableName.value}`)
-    rows.value = res.data.map(row => {
-      const { _sa_instance_state, ...cleaned } = row
-      return cleaned
-    })
+    try {
+      const res = await axios.get(`http://127.0.0.1:8000/data/${tableName.value}`)
+      rows.value = res.data.map(row => {
+        const { _sa_instance_state, ...cleaned } = row
+        return cleaned
+      })
+    } catch (err) {
+      console.error('Failed to fetch data:', err)
+      rows.value = []
+    }
   }
 
   function setTable(name) {
@@ -25,7 +39,7 @@ export const useDataStore = defineStore('dataStore', () => {
     fetchData()
   }
 
-  // 🧠 New: Update a field
+  // 🔄 Update field in a row
   async function updateRow(id, field, value) {
     const row = rows.value.find(r => r.id === id)
     if (!row) return
@@ -38,7 +52,7 @@ export const useDataStore = defineStore('dataStore', () => {
     }
   }
 
-  // 🧹 New: Delete a row
+  // 🧹 Delete a row
   async function deleteRow(id) {
     try {
       await axios.delete(`http://127.0.0.1:8000/data/${tableName.value}/${id}`)
@@ -48,6 +62,7 @@ export const useDataStore = defineStore('dataStore', () => {
     }
   }
 
+  // 🔍 Computed: search and sort
   const filteredRows = computed(() => {
     let result = [...rows.value]
     if (searchQuery.value)
@@ -63,6 +78,7 @@ export const useDataStore = defineStore('dataStore', () => {
     return result
   })
 
+  // 📋 Fetch distinct player names
   async function fetchPlayerNames() {
     try {
       const res = await axios.get('http://127.0.0.1:8000/data/players')
@@ -76,6 +92,7 @@ export const useDataStore = defineStore('dataStore', () => {
     }
   }
 
+  // 📋 Fetch distinct team names
   async function fetchTeamNames() {
     try {
       const res = await axios.get('http://127.0.0.1:8000/data/teams')
@@ -89,12 +106,30 @@ export const useDataStore = defineStore('dataStore', () => {
     }
   }
 
+  // ✅ Optional: Fetch associations (players ↔ teams ↔ matches)
+  async function fetchAssociations() {
+    try {
+      const res = await axios.get('http://127.0.0.1:8000/data/player_team_associations')
+      return res.data.map(link => ({
+        id: link.id,
+        player_id: link.player_id,
+        team_id: link.team_id,
+        match_id: link.match_id,
+        position: link.position,
+      }))
+    } catch (err) {
+      console.error('Failed to fetch player–team associations', err)
+      return []
+    }
+  }
+
   return {
     tableName,
     rows,
     searchQuery,
     sortKey,
     sortAsc,
+    availableTables, // ✅ new
     setTable,
     fetchData,
     filteredRows,
@@ -104,7 +139,6 @@ export const useDataStore = defineStore('dataStore', () => {
     teamNames,
     fetchPlayerNames,
     fetchTeamNames,
+    fetchAssociations, // ✅ new helper
   }
-
-
 })

@@ -8,6 +8,8 @@
           <option value="teams">Teams</option>
           <option value="players">Players</option>
           <option value="results">Results</option>
+          <option value="player_team_associations">Player–Team Associations</option> <!-- ✅ New -->
+
         </select>
         <input v-model="store.searchQuery" placeholder="Search..." />
       </div>
@@ -18,9 +20,10 @@
           <thead>
             <tr>
               <th v-for="key in tableKeys" :key="key" @click="sortBy(key)">
-                {{ key }}
+                {{ key.replaceAll('_', ' ').toUpperCase() }}
                 <span v-if="store.sortKey === key">{{ store.sortAsc ? "▲" : "▼" }}</span>
               </th>
+
               <th>Actions</th>
             </tr>
           </thead>
@@ -31,10 +34,21 @@
                   <input v-model="editValue" @keyup.enter="saveEdit(row.id, key)" @blur="saveEdit(row.id, key)"
                     class="border px-1 py-0.5 w-full" autofocus />
                 </template>
+
+                <!-- 🧠 Display readable names for foreign keys -->
                 <template v-else>
-                  {{ row[key] }}
+                  <span v-if="store.tableName === 'player_team_associations' && key === 'player_id'">
+                    {{ getPlayerName(row[key]) }}
+                  </span>
+                  <span v-else-if="store.tableName === 'player_team_associations' && key === 'team_id'">
+                    {{ getTeamName(row[key]) }}
+                  </span>
+                  <span v-else>
+                    {{ row[key] }}
+                  </span>
                 </template>
               </td>
+
               <td>
                 <button @click="store.deleteRow(row.id)" class="text-red-600 hover:underline">
                   🗑️
@@ -80,7 +94,24 @@ function sortBy(key) {
   }
 }
 
-onMounted(() => store.fetchData())
+// ✅ Helpers to show readable names
+function getPlayerName(playerId) {
+  const player = store.playerNames.find(p => p.id === playerId)
+  return player ? player.name : playerId
+}
+
+function getTeamName(teamId) {
+  const team = store.teamNames.find(t => t.id === teamId)
+  return team ? team.name : teamId
+}
+
+onMounted(async () => {
+  await Promise.all([
+    store.fetchData(),
+    store.fetchPlayerNames(),
+    store.fetchTeamNames(),
+  ])
+})
 </script>
 
 <style scoped>

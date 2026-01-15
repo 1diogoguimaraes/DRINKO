@@ -86,8 +86,8 @@ DeviceState lastSentState = STANDBY;  // or any initial state
 //variables to server
 int match_id;
 String mode = "";
-int team;
-int relayPosition;
+int team=-1;
+int relayPosition=-1;
 float start_weight = 0;
 float end_weight = 0;
 float batteryLevel;
@@ -179,7 +179,8 @@ void setStrip(bool blink, int count, uint32_t color, int delayTime = 500, int po
 
   ws2812b.clear();
 
-  if (position >= 0 && mode == "relay") {
+  if (position >= 0 && (mode == "relay" || mode == "solo_relay")) {
+
     // ----- Relay mode logic -----
     int ledsToLight = min(position + 1, NUM_PIXELS);  // +1 so pos=0 → 1 LED
     for (int i = 0; i < ledsToLight; i++) {
@@ -401,6 +402,7 @@ bool isCupPresent() {
 void sendStatus() {
   StaticJsonDocument<256> doc;
   doc["type"] = "status";
+  doc["device_id"] = device_id;
   doc["state"] = stateToString(currentState);
   doc["match_id"] = match_id;
   doc["mode"] = mode;
@@ -576,8 +578,8 @@ void onwebSocketsEvent(WStype_t type, uint8_t* payload, size_t length) {
         if (strcmp(type, "config") == 0) {
           match_id = doc["match_id"] | 0;
           mode = String((const char*)doc["match_type"]);
-          team = doc["team"] | -1;
-          relayPosition = doc["position"] | -1;
+          team = doc["team"] | 0; // Default to 0 if valid, check logic in main.py ensures it's sent
+          relayPosition = doc["position"] | 0;
 
           // Parse next device MAC (if provided)
           if (doc.containsKey("next_device") && !doc["next_device"].isNull()) {
@@ -595,11 +597,15 @@ void onwebSocketsEvent(WStype_t type, uint8_t* payload, size_t length) {
               peerInfo.channel = 0;
               peerInfo.encrypt = false;
 
-              if (esp_now_add_peer(&peerInfo) == ESP_OK) {
+              esp_err_t addRes = esp_now_add_peer(&peerInfo);
+              if (addRes == ESP_OK) {
                 Serial.printf("Next peer set: %s\n", macStr.c_str());
+              } else if (addRes == ESP_ERR_ESPNOW_EXIST) {
+                Serial.printf("Peer already exists: %s\n", macStr.c_str());
               } else {
-                Serial.println("⚠️ Failed to add peer");
+                Serial.printf("⚠️ Failed to add peer (%d)\n", addRes);
               }
+
             }
           } else {
             nextDeviceSet = false;  // no next device
@@ -609,12 +615,32 @@ void onwebSocketsEvent(WStype_t type, uint8_t* payload, size_t length) {
           // this ESP is now active in relay mode
           changeState(BEFORE_DRINKING);
 
+        }
+        // NEW: Restore weight if server sends it back
+        else if (strcmp(type, "restore_weight") == 0) {
+             start_weight = doc["start_weight"];
+             Serial.printf("Restored start weight: %.2f\n", start_weight);
+
+        }
+        // NEW: Restore full results (Device finished, then disconnected, then reconnected)
+        else if (strcmp(type, "restore_results") == 0) {
+             start_weight = doc["start_weight"];
+             end_weight = doc["end_weight"];
+             drinkingTime = (float)doc["time_seconds"] * 1000; 
+             reactionTime = (float)doc["reaction_time_seconds"] * 1000;
+             foulFlag = doc["foul"];
+             
+             resultsSent = true; // Prevent re-sending
+             changeState(FINISH); // Force state to FINISH
+             Serial.println("Restored previous results state.");
         } else if (strcmp(type, "game_ready") == 0) {
           Serial.println("Game is ready, locking device!");
           gameReadyFlag = true;  // ESP moves from READY → LOCKED
+
         } else if (strcmp(type, "start") == 0) {
           Serial.println("Start signal received!");
           startFlag = true;
+          gameReadyFlag = true; // FIX: Ensure we are considered 'ready' so we can transition through LOCKED -> START
         } else if (strcmp(type, "in_relay") == 0) {
           Serial.println("Relay started signal received!");
           changeState(IN_RELAY);
@@ -785,10 +811,13 @@ void setupWiFi() {
   Serial.println(ssid);
 
   WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
+  int tries=0;
+  while (WiFi.status() != WL_CONNECTED && tries <6) {
     delay(500);
     Serial.print(".");
     setStrip(true, NUM_PIXELS, ws2812b.Color(0, 10, 0), 200, 0);
+    delay(500);
+    tries=+1;
   }
 
   Serial.println("\nWiFi connected!");
@@ -811,30 +840,30 @@ void getIDAndCalibration() {
     device_id = "ESP-003";
     calibration_factor = 407.7;
     ADC_CORRECTION = 1.0145f; 
-  } else if (mac == "24:6F:28:AA:BB:04") {
+  } else if (mac == "84:1F:E8:16:82:A8") {
     device_id = "ESP-004";
     calibration_factor = -6988.0;
-  } else if (mac == "24:6F:28:AA:BB:05") {
+  } else if (mac == "84:1F:E8:1B:3B:68") {
     device_id = "ESP-005";
-    calibration_factor = -7066.7;
-  } else if (mac == "24:6F:28:AA:BB:06") {
+    calibration_factor = 357.195;
+  } else if (mac == "6C:C8:40:5D:4E:8C") {
     device_id = "ESP-006";
-    calibration_factor = -7033.9;
-  } else if (mac == "24:6F:28:AA:BB:07") {
+    calibration_factor = 412.54;
+  } else if (mac == "44:1D:64:E3:34:E0") {
     device_id = "ESP-007";
-    calibration_factor = -7091.1;
-  } else if (mac == "24:6F:28:AA:BB:08") {
+    calibration_factor = 407.2;
+  } else if (mac == "6C:C8:40:5C:67:18") {
     device_id = "ESP-008";
-    calibration_factor = -7010.0;
-  } else if (mac == "24:6F:28:AA:BB:09") {
+    calibration_factor = 393.2;
+  } else if (mac == "6C:C8:40:5D:1A:00") {
     device_id = "ESP-009";
-    calibration_factor = -7077.2;
-  } else if (mac == "24:6F:28:AA:BB:0A") {
+    calibration_factor = 398.5;
+  } else if (mac == "44:1D:64:E3:C9:40") {
     device_id = "ESP-010";
-    calibration_factor = -7044.8;
+    calibration_factor = 394.5;
   } else {
     device_id = "ESP-UNK";         // unknown device
-    calibration_factor = -7050.0;  // default
+    calibration_factor = 394.5;  // default
   }
 
   Serial.printf("MAC: %s → Device ID: %s | Calibration: %.2f\n",
@@ -889,7 +918,20 @@ void setup() {
 
 void loop() {
 
-  webSocket.loop();
+    // ===== Non-blocking WiFi reconnect =====
+  static unsigned long lastWiFiAttempt = 0;
+  unsigned long nowe = millis();
+
+  if (WiFi.status() != WL_CONNECTED) {
+    if (nowe - lastWiFiAttempt > 5000) {  // try every 5 seconds
+      Serial.println("Trying WiFi reconnect...");
+      WiFi.begin(ssid, password);        // re-initiate connection
+      lastWiFiAttempt = nowe;
+    }
+  } else {
+    // WiFi connected → handle WebSocket and other tasks
+    webSocket.loop();
+  }
 
   unsigned long now = millis();
   if (now - lastLoopPrint > 1000) {  // print once per second
@@ -1083,9 +1125,10 @@ void loop() {
 
     case FINISH:
       // Immediately trigger relay if needed
-      if (mode == "relay" && !resultsSent) {
+      if ((mode == "relay" || mode == "solo_relay") && !resultsSent) {
         finishRelay();  // Send baton immediately
       }
+
 
       // Wait for stable weight before sending results
       if (isWeightStable(weight)) {

@@ -242,9 +242,10 @@ const currentViewSubtitle = computed(() => {
 // 🧩 WebSocket listener
 function connectWS() {
     const ws = new WebSocket('ws://127.0.0.1:8000/ws/matches')
+
     ws.onmessage = (event) => {
         const msg = JSON.parse(event.data)
-        if (msg.type === 'matches_update') {
+        if (msg.type === 'matches_update' || msg.type === 'matches_snapshot') {
             const newData = msg.data
 
             // 🧩 Add or update existing matches
@@ -252,10 +253,9 @@ function connectWS() {
                 liveMatches.value[id] = newData[id]
             }
 
-            // 🧹 Remove matches that disappeared (batch update for smooth fade)
+            // 🧹 Remove matches that disappeared
             const updated = { ...liveMatches.value }
             let changed = false
-
             for (const id of Object.keys(liveMatches.value)) {
                 if (!newData[id]) {
                     delete updated[id]
@@ -266,12 +266,20 @@ function connectWS() {
             if (changed) {
                 liveMatches.value = updated
             }
-
-
         }
     }
 
+    ws.onclose = () => {
+        console.warn("⚠️ WebSocket disconnected, retrying in 5s...")
+        setTimeout(connectWS, 5000)
+    }
+
+    ws.onerror = (err) => {
+        console.error("❌ WebSocket error:", err)
+        ws.close()
+    }
 }
+
 
 const isAutoSwitching = ref(true)
 let switchInterval = null

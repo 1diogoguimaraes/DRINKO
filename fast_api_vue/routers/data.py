@@ -11,6 +11,7 @@ TABLE_MAP = {
     "teams": models.Team,
     "players": models.Player,
     "results": models.Result,
+    "player_team_associations": models.PlayerTeamAssociation,
 }
 
 @router.get("/{table_name}")
