@@ -284,7 +284,7 @@ void ledTask(void* parameter) {
     }
 
     ws2812b.show();
-    vTaskDelay(5 / portTICK_PERIOD_MS);
+    vTaskDelay(20 / portTICK_PERIOD_MS);
   }
 }
 
@@ -819,7 +819,7 @@ void setupWiFi() {
     delay(500);
     tries=+1;
   }
-
+  WiFi.setSleep(false);
   Serial.println("\nWiFi connected!");
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
@@ -898,7 +898,7 @@ void setup() {
     NULL,            // Params
     1,               // Priority
     &ledTaskHandle,  // Task handle
-    0                // Core (0 or 1)
+    1                // Core (0 or 1)
   );
 
   // Connect webSockets
