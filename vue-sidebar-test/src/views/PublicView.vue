@@ -64,7 +64,8 @@
                         <h3>{{ match.match_type.toUpperCase() }}</h3>
 
                         <div v-if="match.match_type === 'solo'">
-                            <div v-for="team in match.teams" :key="team.id" class="team-block">
+                            <div v-for="(team, tIndex) in match.teams" :key="team.id" class="team-block">
+                                <h4 v-if="match.status === 'finished'" class="public-winner">🏁 FINISHED</h4>
                                 <div v-for="player in team.players" :key="player.device_id" class="player-card"
                                     :class="{ foul: player.foul }">
                                     <strong v-if="player.player_name">{{ player.player_name }} — </strong>
@@ -78,7 +79,13 @@
 
                         <div v-else>
                             <div v-for="(team, tIndex) in match.teams" :key="tIndex" class="team-block">
-                                <h4>Team {{ team.name || tIndex + 1 }}</h4>
+                                <h4>
+                                    Team {{ team.name || tIndex + 1 }}
+                                    <span v-if="match.status === 'finished' && match.winner_team === tIndex"
+                                        class="public-winner"> 🏆 WINNER</span>
+                                    <span v-else-if="match.status === 'finished' && match.winner_team === null"
+                                        class="public-tie"> 🤝 NO WINNER</span>
+                                </h4>
                                 <div v-for="player in team.players" :key="player.device_id" class="player-card"
                                     :class="{ foul: player.foul }">
                                     <strong v-if="player.player_name">{{ player.player_name }} — </strong>
@@ -609,7 +616,30 @@ h4 {
     transition: transform 0.3s ease, box-shadow 0.3s ease;
 }
 
+.public-winner {
+    color: #fbbf24;
+    font-weight: bold;
+    margin-left: 10px;
+    animation: pulse 1.5s infinite;
+}
 
+.public-tie {
+    color: #9ca3af;
+    font-weight: bold;
+    margin-left: 10px;
+}
+
+@keyframes pulse {
+
+    0%,
+    100% {
+        opacity: 1;
+    }
+
+    50% {
+        opacity: 0.5;
+    }
+}
 
 
 @keyframes highlight-green {

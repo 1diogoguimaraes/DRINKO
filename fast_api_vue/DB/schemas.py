@@ -25,7 +25,7 @@ class TeamInMemory(BaseModel):
 class MatchInMemory(BaseModel):
     match_type: str
     teams: List[TeamInMemory]
-
+    f1_delay: bool = False
 
 class MatchInResponse(MatchInMemory):
     id: int

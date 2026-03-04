@@ -119,6 +119,7 @@ const unsigned long DRINKING_TIMEOUT = 1200000;
 // Countdown vars
 unsigned long countdownStart = 0;
 int countdownSeconds = 3;  // adjust as needed
+unsigned long start_f1_delay = 0; // <--- NEW: Stores the random F1 delay in ms
 bool countdownRunning = false;
 
 
@@ -217,24 +218,36 @@ void ledTask(void* parameter) {
         break;
       case START:
         if (countdownRunning) {
-          unsigned long elapsed = (millis() - countdownStart) / 1000;
-          int remaining = countdownSeconds - elapsed;
+          unsigned long elapsed_ms = millis() - countdownStart;
+          unsigned long standard_countdown_ms = countdownSeconds * 1000;
+          
+          int ledsToLight = 0;
+          
+          if (elapsed_ms >= standard_countdown_ms) {
+             // The 3 seconds are up, but we are in the random F1 delay.
+             // Keep ALL lights solid RED.
+             ledsToLight = NUM_PIXELS; 
+          } else {
+             // Smoothly fill the strip from 1 to 5 LEDs over the standard 3 seconds
+             ledsToLight = (elapsed_ms * NUM_PIXELS) / standard_countdown_ms + 1;
+          }
+          
+          if (ledsToLight > NUM_PIXELS) ledsToLight = NUM_PIXELS;
 
-          // Simple effect: show remaining seconds as lit LEDs
           ws2812b.clear();
-          for (int i = 0; i < remaining && i < NUM_PIXELS; i++) {
-            ws2812b.setPixelColor(i, ws2812b.Color(0, 10, 0));  // green
+          for (int i = 0; i < ledsToLight; i++) {
+            ws2812b.setPixelColor(i, ws2812b.Color(50, 0, 0)); // RED
           }
         } else {
-          // fallback if not counting
-          setStrip(false, NUM_PIXELS, ws2812b.Color(0, 10, 0));
+          ws2812b.clear();
         }
         break;
       case IN_RELAY:
         setStrip(true, NUM_PIXELS, ws2812b.Color(10, 0, 0), 50, relayPosition);
         break;
       case BEFORE_DRINKING:
-        setStrip(true, NUM_PIXELS, ws2812b.Color(0, 10, 10), 50, relayPosition);
+        // Solid bright Green indicating "GO! LIFT THE CUP!"
+        setStrip(false, NUM_PIXELS, ws2812b.Color(0, 50, 0), 0, relayPosition);
         break;
 
       case DRINKING:
@@ -581,6 +594,12 @@ void onwebSocketsEvent(WStype_t type, uint8_t* payload, size_t length) {
           team = doc["team"] | 0; // Default to 0 if valid, check logic in main.py ensures it's sent
           relayPosition = doc["position"] | 0;
 
+          // NEW: Read the F1 delay during config!
+          start_f1_delay = doc["start_f1_delay"] | 0;
+          if (start_f1_delay > 0) {
+             Serial.printf("🏎️ F1 Delay configured: %lu ms\n", start_f1_delay);
+          }
+
           // Parse next device MAC (if provided)
           if (doc.containsKey("next_device") && !doc["next_device"].isNull()) {
             String macStr = String((const char*)doc["next_device"]);
@@ -639,6 +658,9 @@ void onwebSocketsEvent(WStype_t type, uint8_t* payload, size_t length) {
 
         } else if (strcmp(type, "start") == 0) {
           Serial.println("Start signal received!");
+
+
+
           startFlag = true;
           gameReadyFlag = true; // FIX: Ensure we are considered 'ready' so we can transition through LOCKED -> START
         } else if (strcmp(type, "in_relay") == 0) {
@@ -810,6 +832,10 @@ void setupWiFi() {
   Serial.print("Connecting to WiFi: ");
   Serial.println(ssid);
 
+
+  WiFi.mode(WIFI_STA); // Explicitly set station mode
+  WiFi.setSleep(false); // <--- CRITICAL FIX FOR LAG
+
   WiFi.begin(ssid, password);
   int tries=0;
   while (WiFi.status() != WL_CONNECTED && tries <6) {
@@ -842,7 +868,7 @@ void getIDAndCalibration() {
     ADC_CORRECTION = 1.0145f; 
   } else if (mac == "84:1F:E8:16:82:A8") {
     device_id = "ESP-004";
-    calibration_factor = -6988.0;
+    calibration_factor = 394.5;
   } else if (mac == "84:1F:E8:1B:3B:68") {
     device_id = "ESP-005";
     calibration_factor = 357.195;
@@ -896,7 +922,7 @@ void setup() {
     "LED Task",      // Name
     4096,            // Stack size
     NULL,            // Params
-    1,               // Priority
+    2,               // Priority
     &ledTaskHandle,  // Task handle
     1                // Core (0 or 1)
   );
@@ -1053,20 +1079,21 @@ void loop() {
           Serial.println("Countdown started!");
         }
 
-        unsigned long elapsed = (millis() - countdownStart) / 1000;  // seconds passed
-        int remaining = countdownSeconds - elapsed;
+        unsigned long elapsed_ms = millis() - countdownStart;
+        unsigned long standard_countdown_ms = countdownSeconds * 1000;
+        unsigned long total_wait_ms = standard_countdown_ms + start_f1_delay;
 
-        if (remaining > 0) {
-          // Still counting down - check for early lift (FOUL)
+        if (elapsed_ms < total_wait_ms) {
+          // Still counting down OR holding in the F1 delay - check for early lift (FOUL)
           if (isCupLifted()) {
             foulFlag = true;
-            Serial.println("⚠️ FOUL! Cup lifted before countdown finished.");
-            Serial.println("Proceeding to BEFORE_DRINKING despite foul.");
-            changeState(BEFORE_DRINKING);
+            reactionTime = 0; // Force 0 for foul
+            Serial.println("⚠️ FOUL! Cup lifted before countdown/delay finished. -> DRINKING");
+            changeState(DRINKING); 
             countdownRunning = false;
           }
         } else {
-          // Countdown done → go to BEFORE_DRINKING
+          // Both countdown and F1 delay finished → go to BEFORE_DRINKING (Green Light)
           Serial.println("✅ Countdown finished → BEFORE_DRINKING");
           changeState(BEFORE_DRINKING);
           countdownRunning = false;

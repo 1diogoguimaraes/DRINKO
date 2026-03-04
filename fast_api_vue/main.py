@@ -192,7 +192,8 @@ async def websocket_device(websocket: WebSocket, device_id: str):
                         "match_type": match["match_type"],
                         "team": team_index,
                         "position": relay_pos,
-                        "next_device": next_device_mac
+                        "next_device": next_device_mac,
+                        "start_f1_delay": match.get("start_f1_delay", 0) # <-- ADDED HERE
                     })
 
                     match_status = match.get("status", "waiting")
@@ -352,7 +353,8 @@ async def resend_match(match_id: int):
                     "match_type": match["match_type"],
                     "team": team_index,
                     "position": player_index,
-                    "next_device": next_device_mac
+                    "next_device": next_device_mac,
+                    "start_f1_delay": match.get("start_f1_delay", 0) # <-- ADDED HERE
                 }
                 await _safe_send(device_connections[dev_id], payload)
 
@@ -363,9 +365,18 @@ async def resend_match(match_id: int):
 async def create_match(match: schemas.MatchInMemory, db: Session = Depends(get_db)):
     db_match = crud.create_match(db, match.match_type)
 
-    matches_memory[db_match.id] = match.dict(by_alias=True, exclude_unset=False)
+    match_dict = match.dict(by_alias=True, exclude_unset=False)
+    matches_memory[db_match.id] = match_dict
     matches_memory[db_match.id]["id"] = db_match.id
     matches_memory[db_match.id]["status"] = "waiting"
+
+    # --- NEW: Generate F1 Delay here ---
+    # Assumes the frontend sends "f1_delay": true in the match creation JSON
+    use_f1 = match_dict.get("f1_delay", False)
+    f1_delay_ms = random.randint(500, 3000) if use_f1 else 0
+    matches_memory[db_match.id]["start_f1_delay"] = f1_delay_ms
+    # -----------------------------------
+
 
     # Send config to connected devices
     for team_index, team in enumerate(match.teams):
@@ -385,7 +396,8 @@ async def create_match(match: schemas.MatchInMemory, db: Session = Depends(get_d
                 "match_type": db_match.match_type,
                 "team": team_index,
                 "position": player_index,
-                "next_device": next_device_mac  # <-- MAC instead of string ID
+                "next_device": next_device_mac,  # <-- MAC instead of string ID
+                "start_f1_delay": f1_delay_ms  # <-- ADDED HERE
             }
 
             if dev_id in device_connections:

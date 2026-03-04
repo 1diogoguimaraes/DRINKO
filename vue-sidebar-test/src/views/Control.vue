@@ -1,5 +1,3 @@
-<!-- Control.vue-->
-
 <template>
 	<main id="Control-page" class="control-page">
 		<div class="header">
@@ -19,14 +17,11 @@
 		</div>
 
 
-		<!-- 🔹 Main layout: Left (matches) + Right (live status) -->
 		<div class="control-layout">
 
 
-			<!-- LEFT SIDE: Matches -->
 			<div class="matches-column">
 				<h2 class="section-title">Matches</h2>
-				<!-- Unassigned -->
 				<div class="card">
 					<h2 class="card-title">Unassigned</h2>
 					<ul>
@@ -36,13 +31,14 @@
 					</ul>
 				</div>
 
-				<!-- SOLO -->
 				<div class="card">
 					<h2 class="card-title">Solo</h2>
-					<!-- ✅ SOLO TABLE -->
 					<div v-for="(devices, matchId) in soloByMatch" :key="matchId" class="match-section">
 						<h3 class="match-header">
-							<span>Match {{ matchId }}</span>
+							<span>
+								Match {{ matchId }}
+								<span v-if="matchFinished(matchId)" class="winner-badge">🏁 Finished</span>
+							</span>
 							<div class="match-actions">
 								<button class="btn btn-play" :disabled="!allLocked(devices)"
 									@click="playMatch(matchId, 'solo')">▶ PLAY</button>
@@ -83,10 +79,8 @@
 					</div>
 				</div>
 
-				<!-- 1v1 -->
 				<div class="card">
 					<h2 class="card-title">1v1</h2>
-					<!-- ✅ 1v1 TABLE -->
 					<div v-for="(devices, matchId) in oneVsOneByMatch" :key="matchId" class="match-section">
 						<h3 class="match-header">
 							<span>Match {{ matchId }}</span>
@@ -104,6 +98,7 @@
 							<div v-for="team in [0, 1]" :key="team" class="team-card">
 								<h4 class="team-name">
 									{{devices.find(d => d.team === team)?.team_name ?? `Team ${team}`}}
+									<span v-if="isWinner(matchId, team)" class="winner-badge">🏆 WINNER</span>
 								</h4>
 
 								<table class="team-table">
@@ -142,10 +137,8 @@
 					</div>
 				</div>
 
-				<!-- Relay -->
 				<div class="card">
 					<h2 class="card-title">Relay</h2>
-					<!-- ✅ RELAY TABLE -->
 					<div v-for="(devices, matchId) in relayByMatch" :key="matchId" class="match-section">
 						<h3 class="match-header">
 							<span>Match {{ matchId }}</span>
@@ -163,6 +156,7 @@
 							<div v-for="team in [0, 1]" :key="team" class="team-card">
 								<h4 class="team-name">
 									{{devices.find(d => d.team === team)?.team_name ?? `Team ${team}`}}
+									<span v-if="isWinner(matchId, team)" class="winner-badge">🏆 WINNER</span>
 								</h4>
 
 								<table class="team-table">
@@ -200,10 +194,8 @@
 						</div>
 					</div>
 				</div>
-				<!-- Solo Relay -->
 				<div class="card">
 					<h2 class="card-title">Solo Relay</h2>
-					<!-- ✅ SOLO RELAY TABLE -->
 					<div v-for="(devices, matchId) in soloRelayByMatch" :key="matchId" class="match-section">
 						<h3 class="match-header">
 							<span>Match {{ matchId }}</span>
@@ -221,6 +213,7 @@
 							<div v-for="team in [0]" :key="team" class="team-card">
 								<h4 class="team-name">
 									{{devices.find(d => d.team === team)?.team_name ?? `Team ${team}`}}
+									<span v-if="isWinner(matchId, team)" class="winner-badge">🏆 WINNER</span>
 								</h4>
 
 								<table class="team-table">
@@ -260,18 +253,15 @@
 				</div>
 			</div>
 
-			<!-- RIGHT SIDE: Live Table -->
 			<div class="status-column">
 				<h2 class="section-title">📊 Live Device Status</h2>
 				<StandartTable :data="statusArray" />
 			</div>
 		</div>
-		<!-- Modal: Create Match -->
 		<div v-if="showCreateModal" class="modal">
 			<div class="modal-content">
 				<h2 class="modal-title">Create Match</h2>
 
-				<!-- Match type selector -->
 				<label class="input-label">Mode:</label>
 				<select v-model="newMatchType" class="select-input">
 					<option value="solo">Solo</option>
@@ -280,8 +270,11 @@
 					<option value="solo_relay">Solo Relay</option>
 				</select>
 
+				<div class="f1-delay-toggle">
+					<input type="checkbox" id="f1_delay" v-model="useF1Delay" class="checkbox-input" />
+					<label for="f1_delay" class="checkbox-label">Enable F1 Style Random Delay</label>
+				</div>
 
-				<!-- Dynamic device selection -->
 				<div v-if="newMatchType === 'solo'" class="device-selection">
 					<label class="input-label">Select Device:</label>
 					<div class="device-grid">
@@ -296,7 +289,6 @@
 					</div>
 				</div>
 
-				<!-- 1v1 layout -->
 				<div v-else-if="newMatchType === '1v1'" class="teams-selection">
 					<div>
 						<h3 class="team-header team-a">Team A</h3>
@@ -320,7 +312,6 @@
 					</div>
 				</div>
 
-				<!-- Relay layout -->
 				<div v-else-if="newMatchType === 'relay'" class="teams-selection">
 					<div>
 						<h3 class="team-header team-a">Team A</h3>
@@ -343,7 +334,6 @@
 						</div>
 					</div>
 				</div>
-				<!-- Solo Relay layout -->
 				<div v-else-if="newMatchType === 'solo_relay'" class="teams-selection">
 					<div>
 						<h3 class="team-header team-a">Team</h3>
@@ -357,10 +347,8 @@
 				</div>
 
 
-				<!-- Error -->
 				<p v-if="validationError" class="error-message">{{ validationError }}</p>
 
-				<!-- Actions -->
 				<div class="modal-actions">
 					<button class="btn btn-cancel" @click="closeCreateModal">Cancel</button>
 					<span class="separator">|</span>
@@ -369,7 +357,6 @@
 			</div>
 		</div>
 
-		<!-- Modal: Edit Match -->
 		<div v-if="showEditModal && editingMatch && editingMatch.teams" class="modal">
 			<div class="modal-content">
 				<h2 class="modal-title">Edit Match {{ editingMatchId }}</h2>
@@ -527,7 +514,7 @@ onBeforeUnmount(() => {
 
 // merge device + player info
 function mergeDevice(d) {
-	return { ...d, ...(players[d.device_id] || {}) }
+	return { ...d, ...(players.value[d.device_id] || {}) } // FIXED: players.value
 }
 
 // categories with merged data
@@ -674,7 +661,7 @@ const soloRelayByMatch = computed(() => {
 })
 
 function allLocked(devices) {
-	return devices.length > 0 && devices.every((d) => d.status === 'locked')
+	return devices.length > 0 && devices.every((d) => statuses[d.device_id]?.status === 'locked') // FIXED: Check actual status
 }
 function matchFinished(matchId) {
 	const match = matchesMemory.value[String(matchId)]
@@ -682,6 +669,11 @@ function matchFinished(matchId) {
 	return match.status === 'finished' || match.finished === true
 }
 
+function isWinner(matchId, teamIndex) {
+	const match = matchesMemory.value[String(matchId)]
+	if (!match || match.status !== 'finished') return false
+	return match.winner_team === teamIndex
+}
 async function playMatch(matchId, mode) {
 	try {
 		const res = await fetch(`http://localhost:8000/matches/${matchId}/start`, {
@@ -763,17 +755,20 @@ async function resendMatch(matchId) {
 const showCreateModal = ref(false)
 const newMatchType = ref('solo')
 const selectedDevices = ref([])
+const useF1Delay = ref(false) // ✅ NEW: F1 Delay State
 
 function openCreateModal() {
 	showCreateModal.value = true
 	selectedDevices.value = []
 	newMatchType.value = 'solo'
 	teamAssignments.value = { 0: [], 1: [] } // reset
+	useF1Delay.value = false // reset
 }
 function closeCreateModal() {
 	showCreateModal.value = false
 	selectedDevices.value = []
 	teamAssignments.value = { 0: [], 1: [] } // reset
+	useF1Delay.value = false
 }
 
 
@@ -883,6 +878,7 @@ function buildMatchPayload(type, devices) {
 	if (type === 'solo') {
 		return {
 			match_type: 'solo',
+			f1_delay: useF1Delay.value, // ✅ NEW
 			teams: [
 				{
 					team_name: null,
@@ -896,6 +892,7 @@ function buildMatchPayload(type, devices) {
 	if (type === '1v1') {
 		return {
 			match_type: '1v1',
+			f1_delay: useF1Delay.value, // ✅ NEW
 			teams: [
 				{ team_name: null, finished: false, players: [buildPlayer(devices[0])] },
 				{ team_name: null, finished: false, players: [buildPlayer(devices[1])] }
@@ -907,6 +904,7 @@ function buildMatchPayload(type, devices) {
 		const half = devices.length / 2 // safe because already validated
 		return {
 			match_type: 'relay',
+			f1_delay: useF1Delay.value, // ✅ NEW
 			teams: [
 				{ team_name: null, finished: false, players: devices.slice(0, half).map(buildPlayer) },
 				{ team_name: null, finished: false, players: devices.slice(half).map(buildPlayer) }
@@ -916,6 +914,7 @@ function buildMatchPayload(type, devices) {
 	if (type === 'solo_relay') {
 		return {
 			match_type: 'solo_relay',
+			f1_delay: useF1Delay.value, // ✅ NEW
 			teams: [
 				{
 					team_name: null,
@@ -1415,6 +1414,30 @@ function teamButtonClass(deviceId, team) {
 	border: 1px solid #374151;
 }
 
+/* F1 Delay Toggle Styling */
+.f1-delay-toggle {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	margin-bottom: 1rem;
+	padding: 0.5rem;
+	background-color: #e5e7eb;
+	border-radius: 0.375rem;
+	border: 1px solid #d1d5db;
+}
+
+.checkbox-input {
+	width: 1.25rem;
+	height: 1.25rem;
+	cursor: pointer;
+}
+
+.checkbox-label {
+	font-weight: 500;
+	color: #1f2937;
+	cursor: pointer;
+}
+
 /* Device selection */
 .device-selection {
 	margin-top: 0.5rem;
@@ -1568,5 +1591,16 @@ function teamButtonClass(deviceId, team) {
 .edit-player {
 	margin-left: 1rem;
 	margin-bottom: 0.5rem;
+}
+
+.winner-badge {
+	background-color: #fbbf24;
+	color: #92400e;
+	padding: 0.1rem 0.5rem;
+	border-radius: 1rem;
+	font-size: 0.75rem;
+	margin-left: 0.5rem;
+	vertical-align: middle;
+	font-weight: bold;
 }
 </style>
